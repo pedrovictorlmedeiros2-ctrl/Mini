@@ -1,0 +1,5 @@
+DISPLAY_NAME=Hosting Bot Panel
+ENTRYPOINT=index.js
+MEMORY=1024
+VERSION=recommended
+DESCRIPTION=Painel de hospedagem de bots Discord e Site/App v8.5.2

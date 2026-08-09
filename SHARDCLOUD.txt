@@ -1,0 +1,17 @@
+HOSPEDAR NA SHARD CLOUD (shardcloud.app)
+========================================
+
+1. Baixe o ZIP e envie no painel: https://shardcloud.app
+2. Arquivo de config: .shardcloud
+3. ENTRYPOINT=index.js | MEMORY=1024
+
+Variáveis obrigatórias (.env ou Environment Variables):
+- BOT_TOKEN
+- CLIENT_ID
+- OWNER_ID
+- ENCRYPTION_KEY
+
+Dica: se for hospedar vários bots dentro deste painel, use 1024–2048 MB de RAM.
+USE_CONTAINERS=false (normal em planos de bot).
+
+Docs: https://docs.shardcloud.app/quickstart

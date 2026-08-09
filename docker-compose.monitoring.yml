@@ -1,0 +1,26 @@
+# Opcional: stack de observação
+# docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+version: "3.9"
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./grafana/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3003:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/hosting-bot-dashboard.json:/etc/grafana/provisioning/dashboards/hosting-bot.json:ro
+    restart: unless-stopped
+
+volumes:
+  grafana-data:

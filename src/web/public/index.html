@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hosting Panel</title>
+  <style>
+    :root {
+      --bg: #0f1117; --card: #1a1d27; --border: #2a2f3d;
+      --text: #e8eaed; --muted: #9aa0a6; --accent: #5865F2;
+      --ok: #3ba55d; --warn: #faa81a; --err: #ed4245;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+    }
+    header {
+      padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+    }
+    h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+    .badge { font-size: .75rem; padding: .2rem .5rem; border-radius: 999px; background: var(--card); border: 1px solid var(--border); color: var(--muted); }
+    main { padding: 1.25rem 1.5rem; max-width: 1280px; margin: 0 auto; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: .75rem; margin-bottom: 1.25rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; }
+    .card .label { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
+    .card .value { font-size: 1.45rem; font-weight: 700; margin-top: .25rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th, td { text-align: left; padding: .5rem .55rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    th { color: var(--muted); font-weight: 500; font-size: .72rem; text-transform: uppercase; }
+    .status { display: inline-flex; align-items: center; gap: .35rem; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .dot.on { background: var(--ok); } .dot.off { background: var(--err); } .dot.warn { background: var(--warn); }
+    #auth-box {
+      max-width: 360px; margin: 4rem auto; background: var(--card);
+      border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem;
+    }
+    input[type=password] {
+      width: 100%; padding: .65rem .75rem; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); margin: .75rem 0;
+    }
+    button {
+      background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+      padding: .55rem .85rem; font-weight: 600; cursor: pointer; font-size: .8rem;
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    button.danger { background: var(--err); }
+    button.success { background: var(--ok); }
+    button.sm { padding: .3rem .5rem; font-size: .72rem; }
+    .actions { display: flex; gap: .3rem; flex-wrap: wrap; }
+    .err { color: var(--err); font-size: .85rem; margin-top: .5rem; }
+    .features { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .feat { font-size: .7rem; padding: .15rem .45rem; border-radius: 6px; border: 1px solid var(--border); color: var(--muted); }
+    .feat.on { border-color: var(--ok); color: var(--ok); }
+    footer { color: var(--muted); font-size: .75rem; padding: 1rem 1.5rem; text-align: center; }
+    /* Modal logs */
+    .modal-bg {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65);
+      align-items: center; justify-content: center; z-index: 50; padding: 1rem;
+    }
+    .modal-bg.open { display: flex; }
+    .modal {
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      width: min(900px, 100%); max-height: 80vh; display: flex; flex-direction: column;
+    }
+    .modal header { border: 0; border-bottom: 1px solid var(--border); }
+    .modal pre {
+      margin: 0; padding: 1rem; overflow: auto; flex: 1;
+      font-size: .75rem; line-height: 1.4; white-space: pre-wrap; word-break: break-word;
+      background: #0a0c10; color: #c8ccd4;
+    }
+    #toast {
+      position: fixed; bottom: 1.25rem; right: 1.25rem; background: var(--card);
+      border: 1px solid var(--border); padding: .75rem 1rem; border-radius: 10px;
+      display: none; z-index: 60; max-width: 320px; font-size: .85rem;
+    }
+    #toast.show { display: block; }
+    #toast.ok { border-color: var(--ok); }
+    #toast.fail { border-color: var(--err); }
+  </style>
+</head>
+<body>
+  <div id="auth-box">
+    <h1>🔐 Hosting Panel</h1>
+    <p style="color:var(--muted);font-size:.9rem">Informe o <code>WEB_PANEL_TOKEN</code></p>
+    <input type="password" id="token" placeholder="Token" autocomplete="off" />
+    <button id="login" style="width:100%">Entrar</button>
+    <div class="err" id="auth-err"></div>
+  </div>
+
+  <div id="app" style="display:none">
+    <header>
+      <div>
+        <h1>Hosting Panel <span class="badge" id="version">—</span></h1>
+      </div>
+      <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+        <span class="badge" id="uptime">uptime —</span>
+        <button class="secondary" id="refresh">Atualizar</button>
+        <button class="secondary" id="logout">Sair</button>
+      </div>
+    </header>
+    <main>
+      <div class="features" id="features"></div>
+      <div class="grid" id="stats"></div>
+      <div class="card" style="margin-bottom:1rem;overflow:auto">
+        <div class="label" style="margin-bottom:.5rem">Bots</div>
+        <table>
+          <thead>
+            <tr>
+              <th>Nome</th><th>Código</th><th>Status</th><th>Lang</th>
+              <th>CPU</th><th>RAM</th><th>Node</th><th>Health</th><th>Ações</th>
+            </tr>
+          </thead>
+          <tbody id="bots-body"></tbody>
+        </table>
+      </div>
+      <div class="card" style="overflow:auto">
+        <div class="label" style="margin-bottom:.5rem">Nodes</div>
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Nome</th><th>Status</th><th>Bots</th><th>Online</th><th>RAM used</th></tr>
+          </thead>
+          <tbody id="nodes-body"></tbody>
+        </table>
+      </div>
+    </main>
+    <footer id="footer">—</footer>
+  </div>
+
+  <div class="modal-bg" id="logs-modal">
+    <div class="modal">
+      <header>
+        <h1 id="logs-title">Logs</h1>
+        <button class="secondary sm" id="logs-close">Fechar</button>
+      </header>
+      <pre id="logs-body">Carregando…</pre>
+    </div>
+  </div>
+  <div id="toast"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const tokenKey = 'hosting_panel_token';
+    function getToken() { return localStorage.getItem(tokenKey) || ''; }
+    function setToken(t) { localStorage.setItem(tokenKey, t); }
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function toast(msg, ok) {
+      const el = $('toast');
+      el.textContent = msg;
+      el.className = 'show ' + (ok ? 'ok' : 'fail');
+      setTimeout(() => { el.className = ''; }, 3200);
+    }
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        ...opts,
+        headers: {
+          'X-Panel-Token': getToken(),
+          ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+          ...(opts.headers || {}),
+        },
+      });
+      if (res.status === 401) throw new Error('Token inválido');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+      return data;
+    }
+    function fmtUptime(s) {
+      s = Math.floor(s);
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+      return h + 'h ' + m + 'm ' + sec + 's';
+    }
+
+    async function act(id, action) {
+      try {
+        await api('/api/bot/' + encodeURIComponent(id) + '/' + action, { method: 'POST', body: '{}' });
+        toast(action.toUpperCase() + ' ok', true);
+        await load();
+      } catch (e) {
+        toast(e.message, false);
+      }
+    }
+
+    async function showLogs(id, name) {
+      $('logs-title').textContent = 'Logs — ' + name;
+      $('logs-body').textContent = 'Carregando…';
+      $('logs-modal').classList.add('open');
+      try {
+        const data = await api('/api/bot/' + encodeURIComponent(id) + '/logs?lines=120');
+        $('logs-body').textContent = data.logs || '(sem logs)';
+      } catch (e) {
+        $('logs-body').textContent = 'Erro: ' + e.message;
+      }
+    }
+
+    function render(data) {
+      $('version').textContent = 'v' + data.version;
+      $('uptime').textContent = 'uptime ' + fmtUptime(data.uptime);
+      const c = data.counts;
+      $('stats').innerHTML = [
+        ['Bots', c.totalBots], ['Online', c.onlineBots], ['Suspensos', c.suspended],
+        ['Usuários', c.users], ['Pedidos', c.openOrders],
+        ['Fila', (data.queue && data.queue.queued) || 0],
+      ].map(([label, value]) =>
+        `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`
+      ).join('');
+
+      const f = data.features || {};
+      $('features').innerHTML = [
+        ['Containers', f.containers], ['Failover', f.failover], ['Offsite', f.offsite],
+      ].map(([n, on]) => `<span class="feat ${on ? 'on' : ''}">${n}: ${on ? 'ON' : 'off'}</span>`).join('');
+
+      $('bots-body').innerHTML = (data.bots || []).map(b => {
+        const on = b.status === 'online';
+        const id = b.id;
+        return `<tr>
+          <td>${escapeHtml(b.name)}</td>
+          <td><code>${escapeHtml(b.code)}</code></td>
+          <td><span class="status"><span class="dot ${on ? 'on' : 'off'}"></span>${b.status}</span></td>
+          <td>${escapeHtml(b.language || '—')}</td>
+          <td>${b.cpu_usage != null ? b.cpu_usage + '%' : '—'}</td>
+          <td>${b.ram_usage != null ? b.ram_usage + 'MB' : '—'}</td>
+          <td>${escapeHtml(b.node_id || 'master')}</td>
+          <td>${escapeHtml(b.health_status || '—')}</td>
+          <td class="actions">
+            <button class="success sm" ${b.suspended ? 'disabled' : ''} onclick="act('${id}','start')">Start</button>
+            <button class="danger sm" onclick="act('${id}','stop')">Stop</button>
+            <button class="sm" ${b.suspended ? 'disabled' : ''} onclick="act('${id}','restart')">Restart</button>
+            <button class="secondary sm" onclick="showLogs('${id}','${escapeHtml(b.name).replace(/'/g,'')}')">Logs</button>
+          </td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="9" style="color:var(--muted)">Nenhum bot</td></tr>';
+
+      $('nodes-body').innerHTML = (data.nodes || []).map(n => {
+        const on = n.status === 'online';
+        return `<tr>
+          <td><code>${escapeHtml(n.id)}</code></td>
+          <td>${escapeHtml(n.name)}</td>
+          <td><span class="status"><span class="dot ${on ? 'on' : 'off'}"></span>${n.status}</span></td>
+          <td>${n.total_bots ?? '—'}</td>
+          <td>${n.online_bots ?? '—'}</td>
+          <td>${n.used_ram != null ? n.used_ram + 'MB' : '—'}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="6" style="color:var(--muted)">Nenhum node</td></tr>';
+
+      $('footer').textContent = 'Atualizado ' + new Date(data.ts).toLocaleString('pt-BR');
+    }
+
+    async function load() {
+      const data = await api('/api/status');
+      $('auth-box').style.display = 'none';
+      $('app').style.display = 'block';
+      render(data);
+    }
+
+    $('login').onclick = async () => {
+      setToken($('token').value.trim());
+      try { await load(); $('auth-err').textContent = ''; }
+      catch (e) { $('auth-err').textContent = e.message; }
+    };
+    $('refresh').onclick = () => load().catch(e => toast(e.message, false));
+    $('logout').onclick = () => { localStorage.removeItem(tokenKey); location.reload(); };
+    $('logs-close').onclick = () => $('logs-modal').classList.remove('open');
+    $('logs-modal').onclick = (e) => { if (e.target === $('logs-modal')) $('logs-modal').classList.remove('open'); };
+
+    if (getToken()) load().catch(() => {});
+    setInterval(() => {
+      if (getToken() && $('app').style.display !== 'none') load().catch(() => {});
+    }, 15000);
+  </script>
+</body>
+</html>

@@ -1,20 +1,55 @@
 {
   "name": "atlantic-host",
-  "private": true,
-  "version": "0.1.0",
-  "description": "Atlantic Host - plataforma de hospedagem multi-node para bots e aplicacoes",
-  "workspaces": [
-    "packages/*"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
+  "version": "8.5.2",
+  "description": "Bot de hospedagem Enterprise — RAM guard, Site/App flow, soft watchdog, owner DMs",
+  "main": "index.js",
   "scripts": {
-    "dev:control-plane": "npm run dev -w @atlantic/control-plane",
-    "dev:node-agent": "npm run dev -w @atlantic/node-agent",
-    "dev:panel": "npm run dev -w @atlantic/panel",
-    "test": "npm run test -w @atlantic/control-plane && npm run test -w @atlantic/node-agent",
-    "build:panel": "npm run build -w @atlantic/panel"
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "start:prod": "node index.js",
+    "pm2:start": "pm2 start ecosystem.config.js --env production",
+    "pm2:stop": "pm2 stop ecosystem.config.js",
+    "pm2:restart": "pm2 restart ecosystem.config.js",
+    "pm2:delete": "pm2 delete ecosystem.config.js",
+    "pm2:logs": "pm2 logs atlantic-host",
+    "pm2:status": "pm2 status",
+    "migrate:tokens": "node scripts/migrate-tokens.js",
+    "test": "node --test",
+    "test:crypto": "node --test tests/crypto.test.js",
+    "test:database": "node --test tests/database.test.js",
+    "test:audit": "node --test tests/audit.test.js",
+    "test:domains": "node --test tests/domains.test.js",
+    "test:prometheus": "node --test tests/prometheus.test.js",
+    "test:failover": "node --test tests/failover.test.js",
+    "build:bot-images": "sh scripts/build-bot-images.sh",
+    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js"
   },
-  "license": "UNLICENSED"
+  "keywords": [
+    "discord",
+    "hosting",
+    "bot",
+    "manager"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.6.0",
+    "axios": "^1.18.1",
+    "crypto-js": "^4.2.0",
+    "discord.js": "^14.15.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.22.2",
+    "fs-extra": "^11.2.0",
+    "http-proxy-middleware": "^3.0.7",
+    "node-cron": "^3.0.3",
+    "pidusage": "^4.0.1",
+    "systeminformation": "^5.22.0",
+    "ws": "^8.17.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
 }
