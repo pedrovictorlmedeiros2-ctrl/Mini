@@ -7,9 +7,35 @@ export const docker = new Docker({ socketPath: "/var/run/docker.sock" });
 
 const MANAGED_LABEL = "atlantic.managed";
 const SERVER_LABEL = "atlantic.serverId";
+const TENANT_NETWORK = "atlantic-tenants";
 
 function containerName(slug) {
   return `atlantic-${slug}`;
+}
+
+// All client containers share one user-defined bridge network with
+// inter-container communication (ICC) disabled. Without this, every
+// container on Docker's default bridge network can reach every other
+// container directly by IP regardless of which tenant owns them -- a
+// confirmed finding from a security pass (container A could read container
+// B's data over the network even though they belong to different users who
+// have no relationship to each other in the application). Outbound internet
+// access from each container is unaffected; only container-to-container
+// traffic on this network is blocked.
+let tenantNetworkReady = null;
+async function ensureTenantNetwork() {
+  if (tenantNetworkReady) return tenantNetworkReady;
+  tenantNetworkReady = (async () => {
+    const existing = await docker.listNetworks({ filters: { name: [TENANT_NETWORK] } });
+    if (existing.some((n) => n.Name === TENANT_NETWORK)) return;
+    await docker.createNetwork({
+      Name: TENANT_NETWORK,
+      Driver: "bridge",
+      Options: { "com.docker.network.bridge.enable_icc": "false" },
+      Labels: { [MANAGED_LABEL]: "true" },
+    });
+  })();
+  return tenantNetworkReady;
 }
 
 export function volumePathFor(serverId) {
@@ -37,7 +63,7 @@ function ensureVolume(serverId) {
 export async function createContainer({ serverId, slug, image, startCommand, ramMb, cpuPercent, pidsLimit }) {
   const volPath = ensureVolume(serverId);
 
-  await pullImageIfNeeded(image);
+  await Promise.all([pullImageIfNeeded(image), ensureTenantNetwork()]);
 
   const cmd = startCommand && startCommand.trim()
     ? ["sh", "-c", startCommand]
@@ -61,6 +87,7 @@ export async function createContainer({ serverId, slug, image, startCommand, ram
       CapDrop: ["ALL"],
       RestartPolicy: { Name: "no" }, // control-plane owns restart decisions, not Docker
       LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
+      NetworkMode: TENANT_NETWORK,
     },
     AttachStdout: true,
     AttachStderr: true,

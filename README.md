@@ -135,6 +135,44 @@ Cliente cria conta → escolhe plano → cria pedido (PENDING)
   memória/CPU/PIDs do Docker, e todo comando destrutivo do agente confere um
   label `atlantic.managed=true` antes de agir — o agente nunca toca em
   containers que não criou.
+- Todo container de cliente é conectado a uma rede Docker dedicada
+  (`atlantic-tenants`) com comunicação entre containers desabilitada
+  (`enable_icc=false`) — dois bots de tenants diferentes não conseguem se
+  alcançar pela rede, só o host. Isso foi corrigido depois de um teste de
+  penetração real (ver abaixo).
+
+### Teste de penetração real (não só análise estática)
+
+Depois da primeira versão pronta, rodei um teste de invasão real contra a
+própria infraestrutura: provisionei bots com payloads maliciosos de verdade
+(fork bomb, memory bomb, tentativas de escape de container, scan de rede
+entre tenants) e ataquei a API diretamente (JWT forjado, SQL injection,
+IDOR, webhook forjado, path traversal, races). Resultado resumido:
+
+**Bloqueado sem precisar de correção** (23 vetores testados): JWT
+adulterado/`alg:none`, mass assignment, SQL injection, prototype pollution,
+IDOR em 19 endpoints diferentes (servidor, env vars, arquivos, backups,
+domínios, pedidos), WebSocket sem token / com token de node falso, fork bomb
+(travado em exatamente `pids_limit`), memory bomb (travado em exatamente o
+limite de RAM do plano, host nunca afetado), toda tentativa de escape de
+container (socket do Docker inacessível, capabilities zeradas,
+`no-new-privileges` ativo, sem binários SUID, namespaces de PID/mount
+isolados), webhook de pagamento forjado, path traversal no gerenciador de
+arquivos (várias codificações), race condition em aprovação de pedido
+concorrente (10 requisições simultâneas → exatamente 1 servidor criado).
+
+**Encontrado e corrigido**:
+1. **Crítico** — dois containers de tenants *diferentes* conseguiam se
+   comunicar diretamente pela rede Docker padrão (bridge), sem passar pela
+   API nem por nenhuma checagem de autorização. Corrigido isolando todo
+   container numa rede dedicada com `enable_icc=false` (ver acima), com
+   teste de regressão automatizado que sobe dois containers reais e confirma
+   que um não alcança o outro.
+2. **Baixo/médio** — mensagens de erro do gerenciador de arquivos vazavam o
+   caminho absoluto interno do node-agent no host (ex.:
+   `.../node-agent/data/volumes/<id>/...`). Corrigido classificando o erro
+   antes de responder ao cliente (`lib/agentError.js`), com teste de
+   regressão garantindo que nenhum caminho de arquivo escape na resposta.
 
 ## Limitações conhecidas (honestas, não escondidas)
 

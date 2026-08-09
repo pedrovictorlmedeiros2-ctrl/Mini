@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getServerById, getServerOwnedBy, listServersByUser, listAllServers } from "../repositories/servers.js";
 import { requireAuth, requireAdmin } from "../middleware/auth.js";
 import { heavyOpLimiter } from "../middleware/rateLimit.js";
+import { respondAgentError } from "../lib/agentError.js";
 import { validateBody } from "../middleware/validate.js";
 import { enqueue } from "../queue/queue.js";
 import { JobType } from "@atlantic/shared";
@@ -46,7 +47,7 @@ serversRouter.get("/:id/stats", requireAuth, loadServer, async (req, res) => {
     const stats = await sendCommand(req.server.node_id, "GET_STATS", { containerId: req.server.container_id }, { timeoutMs: 10_000 });
     res.json({ stats });
   } catch (err) {
-    res.status(503).json({ error: "unavailable", message: err.message });
+    respondAgentError(res, err, { serverId: req.server.id });
   }
 });
 

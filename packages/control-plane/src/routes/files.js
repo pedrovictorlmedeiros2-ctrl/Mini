@@ -9,6 +9,7 @@ import { isSafeRelativePath } from "../lib/safePath.js";
 import { recordAudit } from "../repositories/auditLog.js";
 import { AuditEvent } from "@atlantic/shared";
 import { config } from "../config.js";
+import { respondAgentError } from "../lib/agentError.js";
 
 export const filesRouter = Router({ mergeParams: true });
 
@@ -35,7 +36,7 @@ filesRouter.get("/", requireAuth, loadServer, requireProvisioned, apiLimiter, sa
     }, { timeoutMs: 15_000 });
     res.json(listing);
   } catch (err) {
-    res.status(503).json({ error: "unavailable", message: err.message });
+    respondAgentError(res, err, { serverId: req.server.id });
   }
 });
 
@@ -50,7 +51,7 @@ filesRouter.get("/content", requireAuth, loadServer, requireProvisioned, apiLimi
     }, { timeoutMs: 15_000 });
     res.json(result);
   } catch (err) {
-    res.status(503).json({ error: "unavailable", message: err.message });
+    respondAgentError(res, err, { serverId: req.server.id });
   }
 });
 
@@ -72,7 +73,7 @@ filesRouter.put("/content", requireAuth, loadServer, requireProvisioned, uploadL
     recordAudit({ actorUserId: req.user.id, event: AuditEvent.FILE_UPLOADED, targetType: "server", targetId: req.server.id, metadata: { path: req.body.path } });
     res.json({ ok: true });
   } catch (err) {
-    res.status(503).json({ error: "unavailable", message: err.message });
+    respondAgentError(res, err, { serverId: req.server.id });
   }
 });
 
@@ -84,7 +85,7 @@ filesRouter.post("/mkdir", requireAuth, loadServer, requireProvisioned, apiLimit
     await sendCommand(req.server.node_id, "MKDIR", { serverId: req.server.id, path: req.body.path }, { timeoutMs: 10_000 });
     res.json({ ok: true });
   } catch (err) {
-    res.status(503).json({ error: "unavailable", message: err.message });
+    respondAgentError(res, err, { serverId: req.server.id });
   }
 });
 
@@ -98,7 +99,7 @@ filesRouter.post("/rename", requireAuth, loadServer, requireProvisioned, apiLimi
     await sendCommand(req.server.node_id, "RENAME_FILE", { serverId: req.server.id, from: req.body.from, to: req.body.to }, { timeoutMs: 10_000 });
     res.json({ ok: true });
   } catch (err) {
-    res.status(503).json({ error: "unavailable", message: err.message });
+    respondAgentError(res, err, { serverId: req.server.id });
   }
 });
 
@@ -108,7 +109,7 @@ filesRouter.delete("/", requireAuth, loadServer, requireProvisioned, apiLimiter,
     recordAudit({ actorUserId: req.user.id, event: AuditEvent.FILE_DELETED, targetType: "server", targetId: req.server.id, metadata: { path: req.body.path } });
     res.json({ ok: true });
   } catch (err) {
-    res.status(503).json({ error: "unavailable", message: err.message });
+    respondAgentError(res, err, { serverId: req.server.id });
   }
 });
 
