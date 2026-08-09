@@ -1,0 +1,20 @@
+{
+  "name": "atlantic-host",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Atlantic Host - plataforma de hospedagem multi-node para bots e aplicacoes",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:control-plane": "npm run dev -w @atlantic/control-plane",
+    "dev:node-agent": "npm run dev -w @atlantic/node-agent",
+    "dev:panel": "npm run dev -w @atlantic/panel",
+    "test": "npm run test -w @atlantic/control-plane && npm run test -w @atlantic/node-agent",
+    "build:panel": "npm run build -w @atlantic/panel"
+  },
+  "license": "UNLICENSED"
+}

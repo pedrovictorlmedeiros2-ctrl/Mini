@@ -1,0 +1,20 @@
+{
+  "name": "@atlantic/node-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "src/agent.js",
+  "scripts": {
+    "dev": "node --watch src/agent.js",
+    "start": "node src/agent.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "@atlantic/shared": "*",
+    "dockerode": "^4.0.2",
+    "ws": "^8.18.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0"
+  },
+  "license": "UNLICENSED"
+}

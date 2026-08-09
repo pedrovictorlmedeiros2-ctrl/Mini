@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.local
+packages/control-plane/data/*.db
+packages/control-plane/data/*.db-journal
+packages/control-plane/data/*.db-wal
+packages/control-plane/data/*.db-shm
+packages/control-plane/data/backups/
+packages/control-plane/data/storage/
+packages/node-agent/data/
+.DS_Store
+coverage/
+*.tsbuildinfo

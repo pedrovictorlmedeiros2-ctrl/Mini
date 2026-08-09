@@ -1,0 +1,27 @@
+{
+  "name": "@atlantic/control-plane",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "@atlantic/shared": "*",
+    "better-sqlite3": "^11.3.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "express": "^4.21.0",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.4.0",
+    "cors": "^2.8.5",
+    "multer": "^2.2.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8",
+    "dotenv": "^16.4.5"
+  },
+  "license": "UNLICENSED"
+}
