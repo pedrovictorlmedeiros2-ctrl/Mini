@@ -83,6 +83,7 @@ const { startHealthEndpoint } = require('./src/managers/healthEndpoint');
 const { startWorkerAgent, stopWorkerAgent } = require('./src/managers/workerAgent');
 const { startFailoverScheduler, stopFailoverScheduler } = require('./src/managers/failoverManager');
 const { startWebPanel, stopWebPanel } = require('./src/web/panelServer');
+const { startCustomerPanel, stopCustomerPanel } = require('./src/web/customerPanel');
 
 // ── INICIALIZAÇÃO DO BANCO DE DADOS, CONSOLE E MONITORAMENTO ──────────────────
 initDatabase();
@@ -96,6 +97,7 @@ startMonitoring(); // Inicia monitoramento de recursos a cada 30s
 startMaintenanceScheduler();
 startFailoverScheduler();
 startWebPanel();
+startCustomerPanel();
 setInterval(() => collectSystemMetrics(), 5 * 60 * 1000);
 startHealthEndpoint(process.env.HEALTH_PORT || 3001);
 // Multi-node worker agent (só sobe se NODE_ROLE=worker ou WORKER_PORT definido)
@@ -231,6 +233,7 @@ async function gracefulShutdown(signal) {
     try { stopWorkerAgent(); } catch { /* ignore */ }
     try { stopFailoverScheduler(); } catch { /* ignore */ }
     try { stopWebPanel(); } catch { /* ignore */ }
+    try { stopCustomerPanel(); } catch { /* ignore */ }
 
     const onlineBots = getOnlineBots();
     if (onlineBots.length > 0) {

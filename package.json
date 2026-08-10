@@ -1,7 +1,7 @@
 {
   "name": "atlantic-host",
-  "version": "8.5.2",
-  "description": "Bot de hospedagem Enterprise — RAM guard, Site/App flow, soft watchdog, owner DMs",
+  "version": "8.6.0",
+  "description": "Bot de hospedagem Enterprise, com painel do cliente (login Discord OAuth2 + mini editor de codigo) — RAM guard, Site/App flow, soft watchdog, owner DMs",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -21,8 +21,15 @@
     "test:domains": "node --test tests/domains.test.js",
     "test:prometheus": "node --test tests/prometheus.test.js",
     "test:failover": "node --test tests/failover.test.js",
+    "test:panelAuth": "node --test tests/panelAuth.test.js",
+    "test:panelSession": "node --test tests/panelSession.test.js",
+    "test:fileManager": "node --test tests/fileManager.test.js tests/fileManagerStat.test.js",
+    "test:securityWrapper": "node --test tests/securityWrapper.test.js",
+    "test:containerManager": "node --test tests/containerManager.test.js",
+    "test:customerPanel": "node --test tests/customerPanel.test.js",
+    "test:consoleManager": "node --test tests/consoleManager.test.js",
     "build:bot-images": "sh scripts/build-bot-images.sh",
-    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js"
+    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/panelAuth.test.js tests/panelSession.test.js tests/fileManager.test.js tests/fileManagerStat.test.js tests/securityWrapper.test.js tests/customerPanel.test.js tests/consoleManager.test.js"
   },
   "keywords": [
     "discord",

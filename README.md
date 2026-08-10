@@ -1,14 +1,20 @@
-# 🤖 Atlantic Host — v8.5.2 Enterprise
+# 🤖 Atlantic Host — v8.6.0 Enterprise
 
-Sistema completo de hospedagem e gestão de bots Discord, com painel interativo, segurança, backup, monitoramento e deploy automatizado.
+Sistema completo de hospedagem e gestão de bots Discord, com painel do
+cliente (login Discord OAuth2), painel administrativo, segurança, backup,
+monitoramento e deploy automatizado.
 
-> Veja `IMPROVEMENTS.md` para o changelog detalhado desta versão.
+> Veja `IMPROVEMENTS.md` e `CHANGELOG-8.6.0.md` para o changelog detalhado.
 
 ---
 
 ## ✨ O que o projeto oferece
 
 - Painel de hospedagem via Discord com comandos slash e UI completa.
+- **Painel web do cliente** (novo): login com Discord OAuth2, cada usuário só
+  vê e gerencia os próprios bots — console ao vivo, gerenciador de arquivos
+  com mini editor de código (syntax highlighting), variáveis de ambiente.
+- Painel administrativo web (token único, visão operacional de todos os bots).
 - Gestão de bots e **Site/App**: start / stop / restart / logs / stats / arquivos / env / backup.
 - Proteção de RAM do host (limites por plano + teto global).
 - Watchdog com aviso antes de matar + DM ao dono.
@@ -19,7 +25,7 @@ Sistema completo de hospedagem e gestão de bots Discord, com painel interativo,
 - Watchdog, crash-loop protection, auto-restart inteligente.
 - Fila de tarefas com concorrência e prioridade.
 - Manutenção automática (logs, histórico, VACUUM).
-- Docker + PM2 prontos para produção.
+- Docker (isolamento real, rede dedicada por tenant) + PM2 prontos para produção.
 
 ---
 
