@@ -40,7 +40,7 @@ function startProxyServer(port = 80) {
         const host = req.headers.host;
 
         // Busca o bot/app associado a este domínio
-        const bot = query('SELECT * FROM bots WHERE domain = ? AND status = "online"', [host])[0];
+        const bot = query("SELECT * FROM bots WHERE domain = ? AND status = 'online'", [host])[0];
 
         if (bot && bot.port) {
             return getOrCreateProxy(bot.port)(req, res, next);
@@ -53,7 +53,7 @@ function startProxyServer(port = 80) {
     // a nenhum bot online, evitando crescimento ilimitado do Map com o tempo
     // (bots são excluídos, portas são reatribuídas a outros bots, etc.).
     setInterval(() => {
-        const activePorts = new Set(query('SELECT port FROM bots WHERE status = "online" AND port IS NOT NULL').map(b => b.port));
+        const activePorts = new Set(query("SELECT port FROM bots WHERE status = 'online' AND port IS NOT NULL").map(b => b.port));
         for (const cachedPort of proxyCache.keys()) {
             if (!activePorts.has(cachedPort)) proxyCache.delete(cachedPort);
         }

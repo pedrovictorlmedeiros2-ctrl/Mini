@@ -211,7 +211,7 @@ async function updateStatusChannels() {
         if (channels.bots) {
             const channel = client.channels.cache.get(channels.bots);
             if (channel) {
-                const row = get('SELECT COUNT(*) as total FROM bots WHERE status = "online"');
+                const row = get("SELECT COUNT(*) as total FROM bots WHERE status = 'online'");
                 const count = row?.total ?? 0;
                 await channel.setName(`🤖┃Bots Online: ${count}`).catch(() => {});
             }
