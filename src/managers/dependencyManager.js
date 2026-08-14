@@ -111,6 +111,22 @@ async function installDependencies(botId, folderPath) {
 
             addLog(botId, `📦 Node.js detectado. Instalando com ${pm}...`, 'stdout');
             success = (await runInstallCommand(botId, folderPath, command)) && success;
+
+            // Projetos TypeScript (ex: usam Prisma, imports estilo "./foo.js"
+            // dentro de arquivos .ts) precisam ser compilados antes de rodar —
+            // o Node não sabe mapear ".ts" -> ".js" sozinho. Só roda o script
+            // "build" que o PRÓPRIO bot declarou (não é código de terceiro
+            // baixado via npm — mesmo raciocínio já usado no `pip install -e .`
+            // acima), então não é afetado pela trava de --ignore-scripts.
+            if (success) {
+                let pkg = null;
+                try { pkg = JSON.parse(fs.readFileSync(path.join(folderPath, 'package.json'), 'utf8')); } catch { /* ignore */ }
+                if (pkg?.scripts?.build) {
+                    const buildCmd = pm === 'npm' ? 'npm run build' : `${pm} run build`;
+                    addLog(botId, '🔨 Script de build detectado no package.json. Compilando...', 'stdout');
+                    success = (await runInstallCommand(botId, folderPath, buildCmd)) && success;
+                }
+            }
         }
 
         // ── Python ───────────────────────────────────────────────────────────
