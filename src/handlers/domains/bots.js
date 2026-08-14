@@ -30,7 +30,7 @@ const { showBotPanel, showConfigPanel, showFileBrowser, showFileActions, encodeF
 
 
 const EXACT = ['my_bots', 'select_my_bot', 'config_bot_list', 'select_config_bot'];
-const PREFIXES = ['bot_collabs_', 'bot_collab_add_', 'modal_bot_collab_add_', 'bot_collab_remove_', 'modal_bot_collab_remove_', 'bot_panel_', 'bot_start_', 'bot_stop_', 'bot_restart_', 'bot_logs_search_', 'modal_logs_search_', 'bot_logs_download_', 'bot_logs_clear_', 'bot_logs_', 'bot_ai_diag_', 'bot_stats_', 'bot_backup_', 'bot_clone_', 'bot_github_update_', 'bot_github_branch_', 'modal_github_branch_', 'bot_github_rollback_', 'select_github_rollback_', 'bot_suspend_', 'modal_bot_suspend_', 'bot_unsuspend_', 'config_edit_', 'modal_edit_', 'config_delete_', 'config_confirm_delete_', 'config_toggle_restart_'];
+const PREFIXES = ['bot_collabs_', 'bot_collab_add_', 'modal_bot_collab_add_', 'bot_collab_remove_', 'modal_bot_collab_remove_', 'bot_panel_', 'bot_start_', 'bot_stop_', 'bot_restart_', 'bot_logs_search_', 'modal_logs_search_', 'bot_logs_download_', 'bot_logs_clear_', 'bot_logs_', 'bot_ai_diag_', 'bot_stats_', 'bot_backup_', 'bot_clone_', 'bot_github_update_', 'bot_github_branch_', 'modal_github_branch_', 'bot_github_rollback_', 'select_github_rollback_', 'bot_suspend_', 'modal_bot_suspend_', 'bot_unsuspend_', 'config_edit_', 'modal_edit_', 'config_delete_', 'config_confirm_delete_', 'config_toggle_restart_', 'config_reinstall_deps_'];
 
 // IDs do monólito (interactionHandler) que NÃO devem cair neste domínio
 const BLOCKED = new Set([
@@ -1062,6 +1062,29 @@ else if (customId.startsWith('config_toggle_restart_')) {
         content: `${config.emojis.success} Auto Restart **${newValue ? 'ativado' : 'desativado'}** para o bot **${bot.name}**!`,
         ephemeral: true,
     });
+}
+
+else if (customId.startsWith('config_reinstall_deps_')) {
+    const botId = customId.replace('config_reinstall_deps_', '');
+    const bot = get('SELECT * FROM bots WHERE id = ?', [botId]);
+    if (!bot) return interaction.reply({ content: 'Bot não encontrado.', ephemeral: true });
+    if (!canManageBot(interaction.user.id, bot, 'config')) {
+        return interaction.reply({ content: `${config.emojis.error} Você não tem permissão.`, ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    try {
+        const success = await installDependencies(botId, bot.folder_path);
+        logAction(botId, interaction.user.id, 'CONFIG', 'Reinstalação de dependências solicitada manualmente');
+        const restartNote = bot.status === 'online' ? '\n⚠️ Reinicie o bot para os arquivos recompilados entrarem em uso.' : '';
+        await interaction.editReply({
+            content: success
+                ? `${config.emojis.success} Dependências reinstaladas (npm/pip install, \`prisma generate\` e \`build\` quando detectados).${restartNote}`
+                : `${config.emojis.error} A reinstalação terminou com falha — confira os logs do bot (📜 Logs) para o erro exato.`,
+        });
+    } catch (err) {
+        await interaction.editReply({ content: `${config.emojis.error} Erro ao reinstalar: ${err.message}` });
+    }
 }
 
 else if (customId.startsWith('config_delete_')) {

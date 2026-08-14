@@ -247,7 +247,8 @@ async function showConfigPanel(interaction, botId) {
         new ButtonBuilder().setCustomId(`config_delete_${botId}`).setLabel('Excluir').setEmoji(config.emojis.delete).setStyle(ButtonStyle.Danger)
     );
     const row2 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`config_edit_runtime_${botId}`).setLabel('Editar Versão do Runtime').setEmoji('🧩').setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId(`config_edit_runtime_${botId}`).setLabel('Editar Versão do Runtime').setEmoji('🧩').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`config_reinstall_deps_${botId}`).setLabel('Reinstalar Dependências').setEmoji('📦').setStyle(ButtonStyle.Secondary)
     );
 
     await interaction.update({ embeds: [embed], components: [row, row2] });
