@@ -82,6 +82,7 @@ const { recordAuditEvent } = require('./src/managers/auditManager');
 const { startHealthEndpoint } = require('./src/managers/healthEndpoint');
 const { startWorkerAgent, stopWorkerAgent } = require('./src/managers/workerAgent');
 const { startFailoverScheduler, stopFailoverScheduler } = require('./src/managers/failoverManager');
+const { reconcileStuckIncidents } = require('./src/managers/security/IncidentResponseManager');
 
 // ── INICIALIZAÇÃO DO BANCO DE DADOS, CONSOLE E MONITORAMENTO ──────────────────
 initDatabase();
@@ -89,6 +90,15 @@ initDatabase();
 // junto da função em processManager.js. Antes rodava automaticamente ao
 // importar o módulo (linha acima), ou seja, antes da tabela `bots` existir.
 syncStatusOnStartup();
+// KAMIKAZE MODE: se o Atlantic Host caiu no meio de um incidente (o lock em
+// memória do IncidentResponseManager se perde no restart), qualquer
+// incidente preso num estado não-terminal é marcado failed_safe agora —
+// nunca tenta resumir uma resposta parcialmente executada às cegas. Mesmo
+// espírito do syncStatusOnStartup() logo acima, aplicado a incidentes.
+// Não bloqueia o boot — roda em background, com erro registrado se falhar.
+reconcileStuckIncidents().catch((err) => {
+    console.error('[Kamikaze] Falha na reconciliação de incidentes presos:', err.message);
+});
 initConsole();
 startScheduler();
 startMonitoring(); // Inicia monitoramento de recursos a cada 30s

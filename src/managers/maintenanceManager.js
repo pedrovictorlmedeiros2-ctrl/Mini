@@ -82,6 +82,49 @@ function pruneDatabaseHistory() {
     return deleted;
 }
 
+/**
+ * Apaga backups com mais de 30 dias, mas NUNCA o último que resta pro bot.
+ * Extraído em função própria pra ser testável isoladamente, sem precisar
+ * rodar o resto de pruneStaleArtifacts() (que mexe em pastas reais do
+ * projeto via process.cwd() — não é seguro exercitar isso num teste
+ * automatizado sem risco de tocar arquivos de verdade do repositório).
+ *
+ * CORREÇÃO DE SEGURANÇA (gap encontrado na entrega do Kamikaze Mode): esta
+ * rotina apagava (DELETE + unlink) qualquer backup com mais de 30 dias sem
+ * checar se era o único que sobrava pro bot — ao contrário de
+ * backupManager.cleanupOldBackups() (limpeza por QUANTIDADE, que nunca
+ * zera os backups de um bot). Um bot raramente backupado podia
+ * legitimamente ficar com ZERO backups por causa desta manutenção de
+ * rotina, sem relação nenhuma com um incidente — o que minaria a garantia
+ * de "nunca destruir o único backup existente" que o Kamikaze Mode promete
+ * ao localizar o último snapshot seguro pra restauração automática.
+ *
+ * @returns {number} quantidade de backups removidos
+ */
+function pruneOldBackups() {
+    const oldBackups = query(
+        `SELECT id, bot_id, file_path FROM backups
+         WHERE created_at < datetime('now', '-30 days')
+         ORDER BY bot_id, created_at ASC`
+    );
+    const totalPerBot = new Map();
+    for (const row of query('SELECT bot_id, COUNT(*) as total FROM backups GROUP BY bot_id')) {
+        totalPerBot.set(row.bot_id, row.total);
+    }
+    const deletedPerBot = new Map();
+    let removed = 0;
+    for (const backup of oldBackups) {
+        const total = totalPerBot.get(backup.bot_id) || 0;
+        const alreadyDeleted = deletedPerBot.get(backup.bot_id) || 0;
+        if (total - alreadyDeleted <= 1) continue; // último backup do bot — preserva
+        safeUnlink(backup.file_path);
+        run('DELETE FROM backups WHERE id = ?', [backup.id]);
+        deletedPerBot.set(backup.bot_id, alreadyDeleted + 1);
+        removed += 1;
+    }
+    return removed;
+}
+
 function pruneStaleArtifacts() {
     let stats = { folders: 0, backups: 0, logs: 0, receipts: 0, dbRows: 0 };
 
@@ -103,15 +146,7 @@ function pruneStaleArtifacts() {
             } catch { /* ignore */ }
         }
 
-        // Backups > 30 dias
-        const oldBackups = query(
-            "SELECT id, file_path FROM backups WHERE created_at < datetime('now', '-30 days')"
-        );
-        for (const backup of oldBackups) {
-            safeUnlink(backup.file_path);
-            run('DELETE FROM backups WHERE id = ?', [backup.id]);
-            stats.backups += 1;
-        }
+        stats.backups = pruneOldBackups();
 
         // Logs de bots em disco
         const logsDir = path.join(process.cwd(), 'logs', 'bots');
@@ -184,4 +219,5 @@ module.exports = {
     startMaintenanceScheduler,
     stopMaintenanceScheduler,
     pruneStaleArtifacts,
+    pruneOldBackups,
 };

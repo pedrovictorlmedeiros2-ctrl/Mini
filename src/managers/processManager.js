@@ -315,6 +315,48 @@ function assertHostRamAvailable(neededMB, excludeBotId = null) {
     return { usedByBots, hardCapMB, freeMB, totalMB };
 }
 
+// Marcadores de caminho que sugerem uma tentativa de ler/escrever algo da
+// PLATAFORMA (não do próprio bot) — evidência "dura" pro SecurityEngine
+// (um único evento já é CRITICAL, ver SecurityEngine.js). Não é uma lista
+// exaustiva, é deliberadamente pequena e explícita: preferimos deixar um
+// caso passar como sinal genérico (ainda SUSPICIOUS/HIGH) a arriscar falso
+// positivo numa lista ampla demais.
+const PLATFORM_SECRET_MARKERS = /\.env\b|hosting\.db|ENCRYPTION_KEY|GITHUB_WEBHOOK_SECRET/i;
+
+/**
+ * Interpreta uma linha de log fixa do security_wrapper.js ("🚨 SEGURANÇA: ...")
+ * e repassa pro SecurityEngine com o código certo. Lazy require: evita
+ * ciclo de carregamento (SecurityEngine -> IncidentResponseManager ->
+ * processManager), já que isto só roda em tempo de execução, bem depois de
+ * todo mundo já ter terminado de carregar.
+ */
+function reportSecurityWrapperViolation(botId, text) {
+    const { reportSignal } = require('./security/SecurityEngine');
+
+    const pathMatch = text.match(/fora da pasta do bot(?: via link simbólico)?: (.+)/);
+    let code = 'wrapper_violation';
+
+    if (/via link simbólico/.test(text)) {
+        code = 'symlink_escape_blocked';
+        if (pathMatch && PLATFORM_SECRET_MARKERS.test(pathMatch[1])) code = 'platform_secret_path_blocked';
+    } else if (pathMatch) {
+        code = PLATFORM_SECRET_MARKERS.test(pathMatch[1]) ? 'platform_secret_path_blocked' : 'path_escape_blocked';
+    } else if (/módulo '.+' é proibido/.test(text)) {
+        code = 'banned_module_blocked';
+    } else if (/process\.binding/.test(text)) {
+        code = 'banned_binding_blocked';
+    }
+
+    reportSignal({
+        botId,
+        source: 'security_wrapper',
+        code,
+        // Nunca inclui o texto bruto completo (pode conter o caminho
+        // tentado, que já é suficiente contexto sem precisar do log inteiro).
+        details: { matchedPath: pathMatch ? pathMatch[1].slice(0, 200) : null },
+    });
+}
+
 /**
  * Inicia um bot hospedado.
  * @param {string} botId - ID do bot no banco de dados
@@ -658,6 +700,19 @@ async function startBot(botId) {
 
     proc.stderr.on('data', (data) => {
         addLog(botId, data, 'stderr');
+        // KAMIKAZE MODE: security_wrapper.js (backend 'process') loga
+        // violações com "console.error" DENTRO do próprio processo do bot —
+        // sem isto, essas linhas ficavam só no stderr capturado, invisíveis
+        // pra qualquer sistema de resposta automática. Reconhece o prefixo
+        // fixo (nunca muda, ver security_wrapper.js) e repassa pro
+        // SecurityEngine classificar. Nunca deixa uma falha aqui quebrar a
+        // captura normal de logs.
+        try {
+            const text = data.toString();
+            if (text.includes('🚨 SEGURANÇA')) {
+                reportSecurityWrapperViolation(botId, text);
+            }
+        } catch (_) { /* nunca quebra a captura de logs por causa disso */ }
     });
 
     // ── MONITORAMENTO DE CRASH / AUTO-RESTART ─────────────────────────────────

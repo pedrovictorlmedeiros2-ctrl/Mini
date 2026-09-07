@@ -451,6 +451,19 @@ class LinuxSandboxBackend extends EventEmitter {
         return {
             memoryCurrentBytes: readNum('memory.current'),
             pidsCurrent: readNum('pids.current'),
+            // Contador cumulativo de OOM-kills reais do kernel pra este
+            // cgroup (não é uma estimativa — vem de memory.events, mesmo
+            // arquivo que systemd/runc usam pra saber se um processo
+            // morreu por estouro de memory.max). Usado pelo monitorManager
+            // pra alimentar sinais de segurança do Kamikaze Mode (padrão de
+            // resource-exhaustion repetido).
+            oomKillCount: (() => {
+                try {
+                    const content = fs.readFileSync(path.join(this.cgroupDir, 'memory.events'), 'utf8');
+                    const m = content.match(/oom_kill (\d+)/);
+                    return m ? parseInt(m[1], 10) : 0;
+                } catch { return 0; }
+            })(),
             cpuStat: (() => {
                 try { return fs.readFileSync(path.join(this.cgroupDir, 'cpu.stat'), 'utf8'); } catch { return null; }
             })(),

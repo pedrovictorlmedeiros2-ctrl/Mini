@@ -70,6 +70,25 @@ function startMonitoring(intervalMs) {
                     const m = entry.sandbox.metrics();
                     if (!m || m.memoryCurrentBytes == null) continue; // cgroup ainda não populado neste ciclo
                     ramUsageMB = m.memoryCurrentBytes / 1024 / 1024;
+
+                    // KAMIKAZE MODE: padrões de fork-bomb (pids.current no
+                    // teto do cgroup) e de resource-exhaustion (kernel
+                    // matando o processo por OOM) são sinais de segurança,
+                    // não só números de recurso — o watchdog comum
+                    // (warn/kill abaixo) continua idêntico pro "mau
+                    // comportamento normal"; isto é uma camada adicional,
+                    // em paralelo, só pra alimentar o SecurityEngine.
+                    try {
+                        const { reportSignal } = require('./security/SecurityEngine');
+                        const pidsMax = entry.sandbox.limits?.pids;
+                        if (pidsMax && m.pidsCurrent != null && m.pidsCurrent >= pidsMax) {
+                            reportSignal({ botId, source: 'cgroup', code: 'pids_ceiling', details: { pidsCurrent: m.pidsCurrent, pidsMax } });
+                        }
+                        if (m.oomKillCount != null && m.oomKillCount > (entry.lastOomKillCount || 0)) {
+                            reportSignal({ botId, source: 'cgroup', code: 'oom_kill', details: { oomKillCount: m.oomKillCount } });
+                        }
+                        entry.lastOomKillCount = m.oomKillCount || 0;
+                    } catch (_) { /* nunca quebra o watchdog por causa disso */ }
                 } else {
                     const stats = await pidusage(entry.process.pid);
                     cpuUsage = stats.cpu;

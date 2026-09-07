@@ -215,6 +215,16 @@ function initDatabase() {
     try { db.exec(`ALTER TABLE bots ADD COLUMN suspended INTEGER DEFAULT 0`); } catch { /* já existe */ }
     try { db.exec(`ALTER TABLE bots ADD COLUMN suspended_reason TEXT`); } catch { /* já existe */ }
 
+    // KAMIKAZE MODE (resposta automática a incidentes de segurança):
+    // 'safety_status' marca se um backup pode ser usado como snapshot seguro
+    // de restauração automática ('safe') ou foi criado com um incidente já
+    // aberto pro bot, portanto não confiável ('flagged_compromised'). Backups
+    // já existentes (de antes desta feature) recebem o default 'safe' — não
+    // retroagimos suspeita sobre nada que já existia.
+    try { db.exec(`ALTER TABLE backups ADD COLUMN safety_status TEXT DEFAULT 'safe'`); } catch { /* já existe */ }
+    try { db.exec(`ALTER TABLE backups ADD COLUMN flagged_by_incident_id INTEGER`); } catch { /* já existe */ }
+    try { db.exec(`ALTER TABLE bots ADD COLUMN token_revoked_at DATETIME`); } catch { /* já existe */ }
+
     // ENV_VARIABLES
     db.exec(`
         CREATE TABLE IF NOT EXISTS env_variables (
@@ -256,6 +266,45 @@ function initDatabase() {
         )
     `);
 
+    // KAMIKAZE MODE — INCIDENTES DE SEGURANÇA
+    // Uma linha por incidente, atualizada in-place a cada transição de estado
+    // (ver IncidentResponseManager.js). 'evidence_json' guarda os sinais que
+    // levaram à classificação CRITICAL — para auditoria, não pra reprocessar.
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS incidents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'detected',
+            evidence_json TEXT,
+            snapshot_used_id INTEGER,
+            quarantine_entry_id INTEGER,
+            credential_action TEXT,
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            resolved_at DATETIME,
+            FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE CASCADE
+        )
+    `);
+
+    // Quarentena: cada linha é uma cópia do workspace comprometido preservada
+    // (nunca apagada automaticamente) para investigação. 'purged' só é ligado
+    // por uma ação manual de admin — não construído nesta entrega.
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS quarantine_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incident_id INTEGER NOT NULL,
+            bot_id TEXT NOT NULL,
+            original_folder_path TEXT NOT NULL,
+            quarantine_path TEXT NOT NULL,
+            size_bytes INTEGER DEFAULT 0,
+            retention_until DATETIME,
+            purged INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE,
+            FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE CASCADE
+        )
+    `);
+
     // INDICES
     db.exec(`CREATE INDEX IF NOT EXISTS idx_bots_creator ON bots(creator_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_bots_code ON bots(code)`);
@@ -271,6 +320,10 @@ function initDatabase() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_bot ON logs(bot_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_user ON logs(user_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_action_history_user ON action_history(user_id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_incidents_bot ON incidents(bot_id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_quarantine_bot ON quarantine_entries(bot_id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_quarantine_incident ON quarantine_entries(incident_id)`);
 
     // CORREÇÃO (defesa em profundidade — race condition de porta): garante no
     // nível do banco que duas linhas nunca tenham a mesma porta não-nula, mesmo

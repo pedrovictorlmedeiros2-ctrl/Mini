@@ -77,9 +77,30 @@ async function createBackup(botId, type = 'manual') {
         const encryptedBuffer = encryptBuffer(plainBuffer);
         fs.writeFileSync(backupPath, encryptedBuffer);
 
+        // KAMIKAZE MODE: um backup criado enquanto o bot já tem um incidente
+        // de segurança em aberto não é confiável como "snapshot seguro" — o
+        // próprio processo de criação pode ter rodado sob código já
+        // comprometido. Nasce 'flagged_compromised' em vez de 'safe' (lazy
+        // require: evita ciclo de módulo com SnapshotManager, que por sua
+        // vez requer este arquivo pra listBackups()).
+        let safetyStatus = 'safe';
+        let flaggedByIncidentId = null;
+        try {
+            const { findOpenIncidentId } = require('./security/SnapshotManager');
+            const openIncidentId = findOpenIncidentId(botId);
+            if (openIncidentId) {
+                safetyStatus = 'flagged_compromised';
+                flaggedByIncidentId = openIncidentId;
+            }
+        } catch (_) {
+            // Tabela/módulo indisponível (ex: banco ainda sem a migração) —
+            // não bloqueia o backup normal, só assume 'safe' (comportamento
+            // pré-Kamikaze).
+        }
+
         run(
-            'INSERT INTO backups (bot_id, file_path, size, type, checksum, encrypted) VALUES (?, ?, ?, ?, ?, 1)',
-            [botId, backupPath, encryptedBuffer.length, type, checksum]
+            'INSERT INTO backups (bot_id, file_path, size, type, checksum, encrypted, safety_status, flagged_by_incident_id) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+            [botId, backupPath, encryptedBuffer.length, type, checksum, safetyStatus, flaggedByIncidentId]
         );
         // Offsite (best-effort, não bloqueia o backup local)
         try { await pushBackupOffsite(backupPath, bot.code); } catch (e) { console.warn('[OFFSITE]', e.message); }
@@ -93,8 +114,11 @@ async function createBackup(botId, type = 'manual') {
 /**
  * Restaura um backup com validação de zip-slip e rollback automático
  * @param {string|number} backupId
+ * @param {{priority?: 'high'|'normal'|'low'}} [options] - prioridade na fila
+ *   (Kamikaze Mode usa 'high' pra furar a fila na frente de backups/restores
+ *   de rotina de outros bots — ver IncidentResponseManager.js)
  */
-async function restoreBackup(backupId) {
+async function restoreBackup(backupId, options = {}) {
     return addToQueue(async () => {
         const backup = get('SELECT * FROM backups WHERE id = ?', [backupId]);
         if (!backup) throw new Error('Backup não encontrado');
@@ -192,7 +216,7 @@ async function restoreBackup(backupId) {
         }
 
         return true;
-    }, `Restauração do backup ${backupId}`);
+    }, `Restauração do backup ${backupId}`, options.priority ? { priority: options.priority } : {});
 }
 
 /**

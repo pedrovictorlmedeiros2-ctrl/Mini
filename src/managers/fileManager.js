@@ -38,6 +38,24 @@ function safeResolve(botFolder, relativePath = '') {
     }
     const realProbe = fs.realpathSync(probe);
     if (realProbe !== base && !realProbe.startsWith(base + path.sep)) {
+        // KAMIKAZE MODE: um bot tentando escapar da própria pasta via
+        // symlink é um sinal de segurança, não só um erro a ser lançado
+        // silenciosamente. botId é derivado do próprio folder_path (sempre
+        // termina no id do bot — ver construção em handlers/domains/bots.js),
+        // pra não precisar mudar a assinatura de safeResolve()/todos os
+        // chamadores só pra passar o botId explicitamente.
+        try {
+            const { reportSignal } = require('./security/SecurityEngine');
+            reportSignal({
+                botId: path.basename(base),
+                source: 'fileManager',
+                code: 'symlink_escape_blocked',
+                details: { relativePath },
+            });
+        } catch (_) {
+            // Nunca deixa uma falha ao reportar o sinal quebrar a proteção
+            // real (o throw abaixo continua acontecendo de qualquer jeito).
+        }
         throw new Error('Caminho invalido: fora da pasta do bot (link simbólico).');
     }
 

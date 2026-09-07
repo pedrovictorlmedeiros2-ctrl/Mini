@@ -129,10 +129,67 @@ function alertResourceWarning(botId, reason) {
     notifyBotOwner(botId, '🟡 Seu bot está perto do limite de recursos', msg);
 }
 
+/**
+ * Notifica o dono sobre um incidente de segurança (Kamikaze Mode) tratado
+ * automaticamente. Linguagem sempre profissional e conservadora — nunca
+ * "ataque", sempre "comportamento potencialmente malicioso". NUNCA inclui
+ * trecho de código, linha bruta de log de segurança, token ou valor de env
+ * var — só o resumo fixo do que foi feito + o ID do incidente.
+ *
+ * @param {string} botId
+ * @param {object} incident
+ * @param {number} incident.id
+ * @param {boolean} incident.restarted - se o bot foi reiniciado no final
+ * @param {object|null} incident.snapshot - linha de backup usada (ou null se nenhum foi restaurado)
+ */
+async function notifyKamikazeIncident(botId, incident) {
+    const bot = get('SELECT name, code FROM bots WHERE id = ?', [botId]);
+    if (!bot) return;
+
+    const lines = [
+        `⚠️ **Comportamento potencialmente malicioso detectado no seu bot** \`${bot.name} (${bot.code})\`.`,
+        '',
+        'Por segurança, tomamos as seguintes medidas automáticas:',
+        '🛑 O bot foi isolado imediatamente (parado e sem acesso à rede)',
+        '💾 O ambiente anterior foi preservado em quarentena para investigação',
+    ];
+
+    if (incident.snapshot) {
+        const when = incident.snapshot.created_at || 'desconhecida';
+        lines.push(`♻️ Um backup seguro anterior foi restaurado (criado em ${when})`);
+    } else {
+        lines.push('⚠️ Não foi possível localizar um backup seguro para restaurar automaticamente — o ambiente permanece em quarentena, aguardando revisão manual.');
+    }
+
+    lines.push('🔑 As variáveis de ambiente do bot foram revogadas por precaução');
+
+    if (incident.restarted) {
+        lines.push('▶️ O bot foi reiniciado com o ambiente restaurado');
+    } else {
+        lines.push('⏸️ O bot **não foi reiniciado automaticamente** — cadastre um novo token do Discord (Editar Token) para reativá-lo. O token anterior foi invalidado localmente por precaução (o Discord em si só é invalidado por você, no Developer Portal).');
+    }
+
+    lines.push('', `**ID do incidente:** \`${incident.id}\` — guarde para consultar com o suporte.`);
+
+    const message = lines.join('\n');
+
+    // Diferente do resto do alertManager (que é "fire and forget" de
+    // propósito), aqui esperamos as duas notificações de verdade antes de
+    // devolver o controle — o IncidentResponseManager só marca o incidente
+    // como resolvido depois desta etapa, então vale garantir que a
+    // tentativa de notificar já aconteceu (best-effort, nunca lança:
+    // sendAlert/notifyBotOwner engolem seus próprios erros internamente).
+    await Promise.all([
+        sendAlert(`🛡️ Kamikaze Mode acionado: ${bot.name}`, message, 'error'),
+        notifyBotOwner(botId, '⚠️ Comportamento potencialmente malicioso detectado no seu bot', message),
+    ]);
+}
+
 module.exports = {
     sendAlert,
     alertBotCrash,
     alertResourceLimit,
     alertResourceWarning,
-    notifyBotOwner
+    notifyBotOwner,
+    notifyKamikazeIncident,
 };

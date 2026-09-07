@@ -32,8 +32,13 @@
     "test:processManagerIntegration": "node --test tests/processManagerSandboxIntegration.test.js",
     "test:networkManager": "node --test tests/networkManager.test.js",
     "test:safeZipFolder": "node --test tests/safeZipFolder.test.js",
+    "test:securityEngine": "node --test tests/securityEngine.test.js",
+    "test:snapshotManager": "node --test tests/snapshotManager.test.js",
+    "test:quarantineManager": "node --test tests/quarantineManager.test.js",
+    "test:incidentResponseManager": "node --test tests/incidentResponseManager.test.js",
+    "test:maintenanceManager": "node --test tests/maintenanceManager.test.js",
     "build:bot-images": "sh scripts/build-bot-images.sh",
-    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js tests/processSandboxBackend.test.js tests/sandboxManager.test.js tests/processManagerSandboxIntegration.test.js tests/networkManager.test.js tests/safeZipFolder.test.js"
+    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js tests/processSandboxBackend.test.js tests/sandboxManager.test.js tests/processManagerSandboxIntegration.test.js tests/networkManager.test.js tests/safeZipFolder.test.js tests/securityEngine.test.js tests/snapshotManager.test.js tests/quarantineManager.test.js tests/incidentResponseManager.test.js tests/maintenanceManager.test.js"
   },
   "keywords": [
     "discord",

@@ -45,6 +45,22 @@ module.exports = {
         maxZipEntries: parseInt(process.env.MAX_ZIP_ENTRIES) || 2000,
         antiSpamCooldown: 3000,
         maxUploadSizeMB: 100,
+
+        // ─── KAMIKAZE MODE (resposta automática a incidentes) ───
+        kamikaze: {
+            enabled: process.env.KAMIKAZE_ENABLED !== 'false', // default ligado
+            // Janela de correlação: sinais HIGH do mesmo bot dentro deste
+            // intervalo podem se combinar pra escalar a CRITICAL (ver
+            // SecurityEngine.js). Fora da janela, sinais são tratados como
+            // eventos novos e independentes.
+            correlationWindowMs: parseInt(process.env.KAMIKAZE_CORRELATION_WINDOW_MS) || 2 * 60 * 1000,
+            // Quantas ocorrências do MESMO tipo de sinal, dentro da janela,
+            // fazem um SUSPICIOUS virar HIGH.
+            highThresholdCount: parseInt(process.env.KAMIKAZE_HIGH_THRESHOLD_COUNT) || 3,
+            // Retenção da cópia em quarentena — só relevante pra uma futura
+            // purga manual/automática (não construída nesta entrega).
+            quarantineRetentionDays: parseInt(process.env.KAMIKAZE_QUARANTINE_RETENTION_DAYS) || 30,
+        },
     },
 
     // ─── RECURSOS DO SISTEMA ───
@@ -53,6 +69,10 @@ module.exports = {
         backupsFolder: './backups',
         logsFolder: './logs',
         receiptsFolder: './receipts',
+        // Pasta dedicada e separada de ./bots e ./backups — nunca fica
+        // dentro de nenhuma das duas, pra nunca ser varrida por engano por
+        // uma limpeza/listagem que assume que só bots ativos moram ali.
+        quarantineFolder: './quarantine',
         bannerPath: './banner.png',
         salesBannerPath: './vendas-banner.png',
         autoRestart: true,
