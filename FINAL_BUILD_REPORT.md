@@ -5,6 +5,11 @@ Versão: 8.6.0 Enterprise
 Data: evolução autônoma sobre o codebase real v8.5.2 (opção escolhida pelo
 usuário entre reconstrução do zero e evolução do projeto existente).
 
+> **Nota (pós-lançamento):** a pedido, o painel do cliente e o painel
+> administrativo descritos neste relatório foram removidos numa revisão
+> posterior — a hospedagem voltou a ser só via comandos slash do bot Discord.
+> Documento mantido como registro histórico do build original.
+
 ---
 
 Arquitetura:

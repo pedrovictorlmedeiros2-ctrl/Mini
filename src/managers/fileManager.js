@@ -61,21 +61,6 @@ function listFiles(botFolder, subPath = '') {
 }
 
 /**
- * Retorna metadados (fs.Stats) de um arquivo dentro da pasta do bot, sem ler
- * o conteúdo — usado por quem chamador precisa checar o tamanho antes de
- * decidir se lê o arquivo (ex: limite de edição inline no painel).
- * SEMPRE passa por safeResolve — nunca faça fs.statSync(path.resolve(...))
- * direto num handler HTTP, isso reabriria o mesmo buraco de path traversal
- * que safeResolve existe pra fechar (oráculo de existência/tamanho de
- * arquivo fora da pasta do bot).
- */
-function statFile(botFolder, filePath) {
-    const fullPath = safeResolve(botFolder, filePath);
-    if (!fs.existsSync(fullPath)) return null;
-    return fs.statSync(fullPath);
-}
-
-/**
  * Le conteudo de um arquivo
  */
 function readFile(botFolder, filePath) {
@@ -161,7 +146,6 @@ function copyFolderRecursive(source, destination) {
 
 module.exports = {
     listFiles,
-    statFile,
     readFile,
     writeFile,
     createFolder,

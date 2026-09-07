@@ -5,7 +5,6 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { EventEmitter } = require('events');
 const { formatDate } = require('../utils/format');
 
 const LOG_DIR = path.join(__dirname, '../../logs/bots');
@@ -14,15 +13,6 @@ const MAX_LOG_FILE_BYTES = 5 * 1024 * 1024; // 5MB — acima disso, roda rotaç�
 
 // Map para armazenar os logs recentes em memória: botId -> string[]
 const logBuffers = new Map();
-
-// NOVA FEATURE: emissor de eventos pra console ao vivo no painel web (SSE).
-// Cada linha nova de log emite `line:<botId>` com o texto formatado — o
-// painel web se inscreve só no evento do bot que está olhando, então isso
-// não custa nada extra pra bots que ninguém está observando no momento.
-// unref() pra não segurar o processo vivo sozinho, e um teto generoso de
-// listeners (cada aba do painel aberta assina um) sem soar alarme de leak.
-const consoleEvents = new EventEmitter();
-consoleEvents.setMaxListeners(200);
 
 /**
  * Roda o arquivo de log se ele passar do tamanho máximo: renomeia para .old
@@ -95,7 +85,6 @@ function addLog(botId, data, type = 'stdout') {
     lines.forEach(line => {
         const formatted = `\`[${timestamp.split(' ')[1]}]\` ${type === 'stderr' ? '🔴' : '⚪'} ${line}`;
         buffer.push(formatted);
-        consoleEvents.emit(`line:${botId}`, { line, type, timestamp: Date.now() });
     });
 
     // Limitar tamanho do buffer
@@ -149,5 +138,4 @@ module.exports = {
     clearBuffer,
     getLogFilePath,
     searchLogs,
-    consoleEvents,
 };

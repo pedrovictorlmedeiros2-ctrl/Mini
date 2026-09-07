@@ -1,5 +1,11 @@
 # v8.6.0
 
+> **Nota (pós-lançamento):** o painel do cliente e o painel administrativo
+> descritos abaixo foram **removidos** numa revisão posterior desta mesma
+> versão, a pedido — a hospedagem voltou a ser 100% via comandos slash do
+> bot Discord, sem nenhum painel web. Seção mantida como registro histórico
+> do que existiu nesse ponto do projeto.
+
 ## Painel do cliente (novo)
 
 Login com **Discord OAuth2** — sem senha, sem cadastro separado. Cada usuário
