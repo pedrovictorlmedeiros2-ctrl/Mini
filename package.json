@@ -25,8 +25,10 @@
     "test:securityWrapper": "node --test tests/securityWrapper.test.js",
     "test:containerManager": "node --test tests/containerManager.test.js",
     "test:consoleManager": "node --test tests/consoleManager.test.js",
+    "test:sandboxCapability": "node --test tests/sandboxCapabilityDetector.test.js",
+    "test:linuxSandbox": "node --test tests/linuxSandboxBackend.test.js",
     "build:bot-images": "sh scripts/build-bot-images.sh",
-    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js"
+    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js"
   },
   "keywords": [
     "discord",
