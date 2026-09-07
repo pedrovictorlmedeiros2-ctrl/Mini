@@ -45,22 +45,46 @@ antes desta iniciativa: com a mesma cautela de sempre.
 
 ## 2. Backend `linux` — o que falta, mesmo sendo isolamento real
 
-### 2.1 Rede: hoje é tudo-ou-nada (bloqueador de uso em produção)
+### 2.1 Rede — ✅ implementada (veth ponto-a-ponto + nftables)
 
-`--unshare-net` sem par `veth` bloqueia **toda** rede, incluindo internet.
-Um bot Discord real (que precisa conectar no gateway do Discord via
-WebSocket) **não vai conseguir se conectar** rodando neste backend, do
-jeito que ele está hoje. Antes de usar este backend em produção de
-verdade para bots que precisam de internet, falta implementar:
+Corrigido. Cada bot ganha uma rede ponto-a-ponto própria (par `veth`,
+sem bridge compartilhada — evita depender de criação de bridge, que se
+mostrou bloqueada em pelo menos um tipo de ambiente containerizado
+durante o desenvolvimento), endereçada dentro de `100.100.0.0/16`
+(faixa CGNAT, RFC 6598 — escolhida de propósito por ser praticamente
+nunca usada por LAN/VPC reais, ao contrário de `10.x`/`172.16.x`/
+`192.168.x`, que têm chance real de colidir com a rede de verdade do
+host). Ver `src/managers/sandbox/networkManager.js` e a seção de rede
+em `SANDBOX.md`.
 
-- Namespace de rede dedicado por bot + par `veth`.
-- Regras `nftables` no lado do host: `DROP` para RFC1918 (redes privadas —
-  impede alcançar outros bots/serviços internos), `DROP` para
-  `169.254.169.254` (metadata de cloud), `ALLOW` para o resto (internet).
+Mecanismo (resumo — detalhe completo no cabeçalho do arquivo): como
+`bwrap` não tem uma flag pra "entrar" num network namespace
+pré-existente, o processo é iniciado com `--block-fd`, que faz o
+`bwrap` criar os namespaces e PARAR antes de rodar o comando real; o
+`veth` é criado e movido pro namespace correto (via `nsenter` no PID
+que de fato entrou nos namespaces — não o PID que o Node rastreia, que
+é um supervisor externo, sem isolamento) NESSA janela, e só depois o
+`bwrap` é desbloqueado.
 
-Sem isso, o backend `linux` só é utilizável hoje para bots que **não**
-precisam de rede (raro na prática) ou para validação/teste do isolamento
-em si.
+Política aplicada via `nftables` (uma vez, no host):
+- `POSTROUTING`: NAT (masquerade) — internet funciona de verdade.
+- `FORWARD`: nega bot→bot e bot→RFC1918/link-local/loopback do host;
+  aceita o resto (internet).
+- `INPUT`: nega qualquer bot alcançando o próprio processo do Atlantic
+  Host (ou qualquer outro serviço escutando no host).
+
+**Validado ao vivo nesta sessão:** internet real alcançável de dentro
+do sandbox (resposta HTTP de verdade); um "control-plane" fake do host
+inalcançável pela mesma sub-rede; dois sandboxes diferentes,
+simultâneos, confirmados **sem conseguir se alcançar um ao outro**
+(teste com "vítima" escutando e "atacante" tentando conectar).
+
+**Ainda não coberto:** filtragem por porta/protocolo (a política é só
+por faixa de IP — um bot pode, em tese, tentar qualquer porta de
+qualquer IP público, sem allowlist de destino) e rate limiting de
+tráfego de rede por bot (nada impede um bot de saturar a banda de
+saída do host, dentro do que o `cgroup` de CPU/RAM já não limita
+diretamente — `nftables` tem suporte a isso, mas não foi configurado).
 
 ### 2.2 Sem seccomp
 
@@ -165,8 +189,8 @@ está realmente ativa" antes de confiar em produção**, não presuma.
 | Acessar Docker socket | ✅ (não montado) | N/A (não aplicável nesse backend) |
 | Acessar credenciais do sistema | ✅ | ❌ |
 | Escalar privilégio (capabilities) | ✅ (todas zeradas) | ❌ (não removidas) |
-| Acessar rede interna/SSRF | ✅ (rede totalmente isolada) | ❌ (achado C3) |
-| Acessar internet (bots reais precisam) | ❌ (ainda não implementado — ver 2.1) | ✅ (sem restrição nenhuma, inclusive o que não deveria) |
+| Acessar rede interna/SSRF | ✅ (veth ponto-a-ponto + nftables, ver 2.1) | ❌ (achado C3) |
+| Acessar internet (bots reais precisam) | ✅ (via veth + nftables — bot↔bot, RFC1918, link-local e o próprio host ficam bloqueados; internet real passa, ver 2.1) | ✅ (sem restrição nenhuma, inclusive o que não deveria) |
 | Fork bomb / exaustão de PID | ⚠️ não validado neste ambiente (cgroup `pids.max`) | ✅ (child_process bloqueado por nome) |
 | Exaurir RAM do host | ⚠️ não validado neste ambiente (cgroup `memory.max`) | ⚠️ só watchdog reativo |
 | Exaurir CPU do host | ⚠️ não validado neste ambiente (cgroup `cpu.max`) | ⚠️ só se `cpulimit`/`nice` disponíveis |
@@ -178,11 +202,13 @@ está realmente ativa" antes de confiar em produção**, não presuma.
 ## 5. Resumo executivo
 
 **O sistema está pronto pra executar código de cliente não confiável de
-verdade quando:** roda em Linux, `SandboxManager` reporta backend
-`'linux'`, e o bot **não precisa de acesso à internet** (a maioria dos
-bots Discord reais precisa — portanto, na prática, **ainda não está
-pronto pra esse caso de uso até a rede restrita-mas-com-internet ser
-implementada**, ver 2.1).
+verdade quando:** roda em Linux e `SandboxManager` reporta backend
+`'linux'`. Isso agora inclui bots que precisam de acesso à internet real
+(a maioria dos bots Discord) — a rede restrita (veth ponto-a-ponto +
+nftables, ver 2.1) libera o tráfego pra internet enquanto bloqueia
+bot↔bot, RFC1918/link-local e o próprio host. O que ainda falta nessa
+frente (filtragem por porta/protocolo, rate limit de banda) é descrito
+em 2.1 e não é bloqueador — é refinamento.
 
 **O sistema continua no mesmo nível de proteção de antes desta iniciativa
 quando:** roda em Windows, ou em Linux sem os requisitos do backend

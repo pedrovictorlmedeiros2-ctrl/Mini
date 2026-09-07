@@ -11,12 +11,12 @@
  *    processos fora dele (resolve C1/C2 do SECURITY_AUDIT.md).
  *  - Privilégios: user namespace com ZERO capabilities efetivas (CapEff
  *    sempre 0000000000000000 — testado e confirmado).
- *  - Rede: nesta versão, `--unshare-net` SEM veth = isolamento total (nem
- *    localhost do host, nem internet). Resolve C3 (nenhum acesso à rede
- *    interna/SSRF), mas também impede o bot de acessar a internet — bots
- *    Discord reais PRECISAM de internet pra funcionar. Rede restrita-mas-
- *    com-internet (veth + nftables) é um item separado, ainda não
- *    implementado — ver SECURITY_LIMITATIONS.md.
+ *  - Rede: cada bot tem uma rede ponto-a-ponto própria (par veth, ver
+ *    networkManager.js), com saída pra internet via NAT — mas bloqueada
+ *    de alcançar outros bots, a rede privada do host, endpoints de
+ *    metadata de cloud, e o próprio processo do Atlantic Host (regras
+ *    nftables aplicadas uma vez, no host). Resolve C3 (SSRF/rede interna)
+ *    sem deixar o bot cego pra internet, que bots Discord reais precisam.
  *  - Recursos: cgroup v2 (memory.max, pids.max, cpu.max) — limite reforçado
  *    pelo KERNEL, não por um watchdog que reage depois do fato.
  *
@@ -27,7 +27,6 @@
  *    maioria dos vetores críticos do audit; seccomp ficaria pra uma
  *    iteração futura, usando um perfil já pronto e auditado (ex: o
  *    default do Docker/runc), nunca escrito do zero aqui.
- *  - Não implementa a rede restrita-mas-com-internet ainda (ver acima).
  *
  * FAIL-CLOSED: se `capabilityDetector.detectCapabilities().linuxSandboxReady`
  * for false, `create()` LANÇA um erro — nunca degrada pra rodar sem
@@ -40,6 +39,7 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const { detectCapabilities, CGROUP_ROOT } = require('../capabilityDetector');
 const { buildBaseSystemBindArgs } = require('../bwrapSystemBinds');
+const networkManager = require('../networkManager');
 
 const MAX_LOG_LINES = 500;
 
@@ -54,6 +54,31 @@ function cpuMaxValue(cpuPercent) {
     const period = 100000; // 100ms, valor padrão comum
     const quota = Math.max(1000, Math.round((cpuPercent / 100) * period));
     return `${quota} ${period}`;
+}
+
+/**
+ * Acha o PID que REALMENTE entrou nos namespaces novos — não é o PID que
+ * spawn() retorna (esse é um processo supervisor externo do bwrap, que
+ * fica FORA de qualquer namespace novo por design, pra poder implementar
+ * --die-with-parent). É um FILHO dele. Usa /proc/<pid>/task/<pid>/children
+ * (exposto pelo kernel, sem precisar de `pgrep` ou varrer todo /proc).
+ * Tenta algumas vezes com um pequeno intervalo — o fork acontece bem no
+ * início da execução do bwrap, mas não é instantâneo o suficiente pra
+ * garantir que já existe no exato instante em que spawn() retorna.
+ */
+async function findInnerPid(outerPid, { attempts = 20, intervalMs = 25 } = {}) {
+    const childrenFile = `/proc/${outerPid}/task/${outerPid}/children`;
+    for (let i = 0; i < attempts; i++) {
+        try {
+            const content = fs.readFileSync(childrenFile, 'utf8').trim();
+            if (content) return parseInt(content.split(/\s+/)[0], 10);
+        } catch {
+            // processo pai pode já ter saído (erro no bwrap) — para de tentar
+            break;
+        }
+        await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return null;
 }
 
 // CORREÇÃO DE SEGURANÇA (auditoria da Fase 3): `id` é usado pra montar o
@@ -103,6 +128,7 @@ class LinuxSandboxBackend extends EventEmitter {
         this.exitCode = null;
         this.startedAt = null;
         this.cgroupDir = null;
+        this.network = null;
         this._logBuffer = [];
     }
 
@@ -121,6 +147,18 @@ class LinuxSandboxBackend extends EventEmitter {
         }
         if (!fs.existsSync(this.folderPath)) {
             throw new Error(`Pasta do bot não existe: ${this.folderPath}`);
+        }
+
+        // CORREÇÃO: restart() chama create() de novo sem passar por
+        // destroy() — sem isto, a alocação de rede da execução anterior
+        // nunca era liberada, vazando um índice de sub-rede a cada
+        // restart (o cgroup não tinha esse problema porque o caminho é
+        // determinístico pelo id e create() já limpa o resquício antes de
+        // recriar; a alocação de rede em memória precisa do mesmo cuidado
+        // explícito).
+        if (this.network) {
+            networkManager.detachNetwork(this.network);
+            this.network = null;
         }
 
         const base = selfCgroupBaseDir();
@@ -148,6 +186,18 @@ class LinuxSandboxBackend extends EventEmitter {
             try { fs.rmdirSync(this.cgroupDir); } catch { /* best effort */ }
             this.cgroupDir = null;
             throw new Error(`Falha ao aplicar limites de cgroup — sandbox não criado (fail-closed): ${err.message}`);
+        }
+
+        // Reserva o endereçamento de rede (não cria nada no SO ainda — só
+        // decide qual /30 este bot vai usar). A criação de fato do veth
+        // acontece em start(), depois do bwrap já estar rodando (ver
+        // networkManager.js pra entender por que a ordem é essa).
+        try {
+            this.network = networkManager.allocateSubnet(this.id);
+        } catch (err) {
+            try { fs.rmdirSync(this.cgroupDir); } catch { /* best effort */ }
+            this.cgroupDir = null;
+            throw new Error(`Falha ao alocar rede do sandbox — sandbox não criado (fail-closed): ${err.message}`);
         }
 
         this.state = 'created';
@@ -199,6 +249,16 @@ class LinuxSandboxBackend extends EventEmitter {
             '--uid', String(this.uid),
             '--gid', String(this.gid),
             '--clearenv',
+            // bwrap não tem uma flag pra "entrar" num network namespace
+            // pré-existente que a gente configure por fora — só criar um
+            // novo (--unshare-net, já coberto por --unshare-all acima) ou
+            // usar o do host (--share-net, nunca usado aqui). --block-fd 3
+            // faz o bwrap criar os namespaces e PARAR antes de executar o
+            // comando real, esperando 1 byte no fd 3 — dá tempo de start()
+            // configurar a rede (veth + IP + rota) de fora, via nsenter no
+            // PID que entrou de fato no namespace, antes do processo do bot
+            // rodar uma linha de código sequer. Ver networkManager.js.
+            '--block-fd', '3',
         ];
         for (const [key, value] of Object.entries(this.env)) {
             args.push('--setenv', key, String(value));
@@ -216,8 +276,10 @@ class LinuxSandboxBackend extends EventEmitter {
         }
 
         const bwrapArgs = this._buildBwrapArgs();
+        // fd extra (índice 3) pro --block-fd — bwrap espera 1 byte nele
+        // antes de executar o comando real (ver comentário em _buildBwrapArgs).
         this.child = spawn('bwrap', bwrapArgs, {
-            stdio: ['ignore', 'pipe', 'pipe'],
+            stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
         });
         this.startedAt = Date.now();
         this.state = 'running';
@@ -234,6 +296,32 @@ class LinuxSandboxBackend extends EventEmitter {
             this._kill('SIGKILL');
             this.state = 'exited';
             throw new Error(`Não foi possível aplicar o cgroup ao processo — sandbox encerrado por segurança: ${err.message}`);
+        }
+
+        // Configura a rede ANTES de desbloquear o bwrap (que ainda está
+        // parado esperando o --block-fd, sem ter executado uma linha sequer
+        // do comando real). Se qualquer passo falhar, derruba tudo — rodar
+        // sem a rede prometida (ou pior, deixar o bwrap preso pra sempre
+        // esperando o fd) não é uma opção.
+        try {
+            const innerPid = await findInnerPid(this.child.pid);
+            if (!innerPid) {
+                throw new Error('não foi possível localizar o processo interno do bwrap (namespaces) a tempo');
+            }
+            networkManager.attachNetwork(this.network, innerPid);
+        } catch (err) {
+            this._kill('SIGKILL');
+            this.state = 'exited';
+            throw new Error(`Não foi possível configurar a rede do sandbox — sandbox encerrado por segurança: ${err.message}`);
+        } finally {
+            // Desbloqueia o bwrap de qualquer jeito (sucesso ou falha) — se
+            // falhou, o processo já foi morto acima, então isto só libera o
+            // fd pra não deixar um processo zumbi esperando indefinidamente
+            // logo antes de morrer.
+            try {
+                this.child.stdio[3].write('x');
+                this.child.stdio[3].end();
+            } catch { /* processo já pode ter morrido */ }
         }
 
         const pushLog = (type) => (data) => {
@@ -313,6 +401,10 @@ class LinuxSandboxBackend extends EventEmitter {
      */
     async destroy() {
         await this.stop();
+        if (this.network) {
+            networkManager.detachNetwork(this.network);
+            this.network = null;
+        }
         if (this.cgroupDir && fs.existsSync(this.cgroupDir)) {
             const dir = this.cgroupDir;
             let removed = false;
@@ -339,6 +431,7 @@ class LinuxSandboxBackend extends EventEmitter {
             exitCode: this.exitCode,
             startedAt: this.startedAt,
             backend: 'linux',
+            network: this.network ? { hostIp: this.network.hostIp, botIp: this.network.botIp } : null,
         };
     }
 

@@ -136,9 +136,48 @@ function detectCgroupV2() {
     }
 }
 
+/**
+ * nftables: teste funcional — cria uma tabela de teste de verdade (prova
+ * permissão real de CAP_NET_ADMIN pra regras de firewall, não só que o
+ * binário existe) e remove em seguida.
+ */
 function detectNft() {
-    const result = tryExec('nft', ['--version']);
-    return { available: result.ok, reason: result.ok ? null : 'binário `nft` (nftables) não encontrado — necessário pra política de rede restrita (Fase 7)' };
+    const versionCheck = tryExec('nft', ['--version']);
+    if (!versionCheck.ok) {
+        return { available: false, reason: 'binário `nft` (nftables) não encontrado — necessário pra política de rede restrita' };
+    }
+    const testTable = `atlantic_probe_${crypto.randomBytes(4).toString('hex')}`;
+    const created = tryExec('nft', ['add', 'table', 'inet', testTable]);
+    if (!created.ok) {
+        return { available: false, reason: `nft presente mas não consegue criar regra de teste (precisa de CAP_NET_ADMIN/root): ${created.error}` };
+    }
+    tryExec('nft', ['delete', 'table', 'inet', testTable]);
+    return { available: true, reason: null };
+}
+
+/**
+ * Rede restrita (veth ponto-a-ponto + nsenter): teste funcional real — cria
+ * um par veth de verdade, confere que os dois lados existem, remove em
+ * seguida. Também confere presença de `nsenter` (usado pra configurar o
+ * lado do bot dentro do namespace de rede criado pelo bwrap via
+ * --block-fd, já que bwrap não tem uma flag pra "entrar" num net namespace
+ * pré-existente — só criar um novo).
+ */
+function detectNetworking() {
+    if (!tryExec('nsenter', ['--version']).ok) {
+        return { available: false, reason: 'binário `nsenter` (util-linux) não encontrado — necessário pra configurar rede dentro do namespace criado pelo bwrap' };
+    }
+    // Nomes de interface no Linux têm limite de 15 caracteres (IFNAMSIZ-1) —
+    // curtos de propósito.
+    const suffix = crypto.randomBytes(3).toString('hex');
+    const vethA = `atlp${suffix}a`;
+    const vethB = `atlp${suffix}b`;
+    const created = tryExec('ip', ['link', 'add', vethA, 'type', 'veth', 'peer', 'name', vethB]);
+    if (!created.ok) {
+        return { available: false, reason: `não foi possível criar par veth de teste (precisa de CAP_NET_ADMIN/root): ${created.error}` };
+    }
+    tryExec('ip', ['link', 'del', vethA]); // remove os dois lados do par de uma vez
+    return { available: true, reason: null };
 }
 
 function detectSystemd() {
@@ -168,6 +207,7 @@ function detectCapabilities() {
         userNamespaces: { available: false },
         cgroupV2: { available: false, delegationWritable: false },
         nft: { available: false },
+        networking: { available: false },
         systemd: { available: false },
         linuxSandboxReady: false,
         linuxSandboxBlockedBy: [],
@@ -182,11 +222,14 @@ function detectCapabilities() {
     result.userNamespaces = detectUserNamespaces();
     result.cgroupV2 = detectCgroupV2();
     result.nft = detectNft();
+    result.networking = detectNetworking();
     result.systemd = detectSystemd();
 
     if (!result.bwrap.available) result.linuxSandboxBlockedBy.push(`bwrap: ${result.bwrap.reason}`);
     if (!result.userNamespaces.available) result.linuxSandboxBlockedBy.push(`user namespaces: ${result.userNamespaces.reason}`);
     if (!result.cgroupV2.delegationWritable) result.linuxSandboxBlockedBy.push(`cgroup v2: ${result.cgroupV2.reason}`);
+    if (!result.nft.available) result.linuxSandboxBlockedBy.push(`nftables: ${result.nft.reason}`);
+    if (!result.networking.available) result.linuxSandboxBlockedBy.push(`rede (veth/nsenter): ${result.networking.reason}`);
 
     result.linuxSandboxReady = result.linuxSandboxBlockedBy.length === 0;
 
@@ -199,6 +242,7 @@ module.exports = {
     detectUserNamespaces,
     detectCgroupV2,
     detectNft,
+    detectNetworking,
     detectSystemd,
     CGROUP_ROOT,
 };

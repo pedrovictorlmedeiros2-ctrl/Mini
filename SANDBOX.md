@@ -41,24 +41,37 @@ recurso.
 | Capabilities | `--cap-drop ALL` | ✅ `CapInh/Prm/Eff/Bnd/Amb` todos zerados (não só CapEff) |
 | Hostname (UTS) | Namespace próprio + `--hostname sandbox-<id>` | ✅ hostname interno ≠ hostname do host |
 | IPC | Namespace próprio | ✅ shared memory criada fora não aparece dentro |
-| Rede | `--unshare-net`, **sem veth** (ver limitação abaixo) | ✅ não alcança um servidor real do host |
+| Rede | Namespace próprio + par `veth` ponto-a-ponto por bot + `nftables` (ver detalhes abaixo) | ✅ alcança a internet real, não alcança o host nem outro bot |
 | Memória | cgroup v2 `memory.max` + `memory.swap.max=0` | ⚠️ código testado, kernel-enforcement só validável em VPS real (ver abaixo) |
 | Processos (cgroup) | cgroup v2 `pids.max` | ⚠️ idem |
 | CPU | cgroup v2 `cpu.max` | ⚠️ idem |
 
-> ⚠️ **Rede: limitação importante.** Nesta versão, o backend `linux`
-> isola a rede **totalmente** (`--unshare-net` sem par `veth`) — o
-> sandbox não alcança nada, **incluindo a internet**. Isso significa que
-> bots Discord reais (que precisam conectar no gateway do Discord) **não
-> vão conseguir se conectar** rodando neste backend, do jeito que ele está
-> hoje. Rede restrita-mas-com-internet (via `veth` + `nftables`,
-> permitindo saída pra internet e bloqueando RFC1918/`169.254.169.254`/
-> localhost do host) é a peça que falta antes deste backend ser utilizável
-> em produção de verdade — ver `SECURITY_LIMITATIONS.md`.
+> ✅ **Rede: implementada (veth ponto-a-ponto + nftables).** Cada bot
+> recebe um namespace de rede próprio, ligado ao host por um par `veth`
+> ponto-a-ponto (sem bridge — cada par é uma sub-rede `/30` isolada,
+> dentro do supernet reservado `100.100.0.0/16`, faixa CGNAT/RFC 6598
+> escolhida de propósito pra não colidir com a LAN/VPC real do host).
+> Como o `bwrap` não tem como "entrar" num namespace de rede
+> pré-configurado (só criar um novo com `--unshare-net` ou herdar o do
+> host com `--share-net`), o processo usa `--block-fd`: o `bwrap` cria
+> todos os namespaces e trava esperando 1 byte num fd antes de executar o
+> bot; nesse intervalo, o host configura o par `veth` e a rota padrão via
+> `nsenter` no namespace já criado (mas ainda vazio), e só então libera a
+> execução. Regras `nftables` (tabela `atlantic_sandbox`) fazem
+> `MASQUERADE` na saída (`postrouting`), permitem tráfego pra internet mas
+> derrubam qualquer coisa destinada a RFC1918/link-local/loopback ou a
+> outro bot (`forward`), e derrubam qualquer pacote do supernet dos bots
+> destinado ao próprio host (`input`) — bloqueando o acesso ao
+> control-plane do Atlantic Host. Validado ao vivo nesta sessão: conexão
+> HTTP real de dentro do sandbox chegando na internet, bloqueio real
+> contra um serviço fake simulando o control-plane do host, e bloqueio
+> real de um sandbox tentando alcançar outro. O que ainda não existe:
+> filtragem por porta/protocolo (hoje é tudo-ou-nada pra internet) e rate
+> limit de banda — ver `SECURITY_LIMITATIONS.md` seção 2.1.
 
 ### Requisitos do host (Linux)
 
-Todos os três, testados de verdade (não só "o binário existe") por
+Todos os quatro, testados de verdade (não só "o binário existe") por
 `capabilityDetector.js`:
 
 1. **`bwrap` (bubblewrap) instalado e funcional**
@@ -100,6 +113,19 @@ Todos os três, testados de verdade (não só "o binário existe") por
 > por padrão na grande maioria das distros modernas (Ubuntu 22.04+, Debian
 > 11+, Fedora recente).
 
+4. **`nftables` funcional + `nsenter` disponível, com `CAP_NET_ADMIN`**
+   (tipicamente equivale a rodar como root, o caso comum de um serviço de
+   hospedagem). `capabilityDetector.js` confirma isso criando e removendo
+   de verdade uma tabela `nftables` de teste e um par `veth` de teste — não
+   apenas checando se os binários existem.
+   ```bash
+   # Debian/Ubuntu
+   apt install nftables iproute2 util-linux
+   ```
+   Sem isso, `linuxSandboxReady` é `false` e o sistema cai (fail-closed)
+   pro backend `process` — nunca sobe um bot num backend `linux` sem rede
+   restrita configurável.
+
 ### Backend `process` — reduzido (Windows e fallback documentado)
 
 Usado sempre fora do Linux, ou (nunca automaticamente — só se você mesmo
@@ -130,6 +156,7 @@ npm run test:linuxSandbox               # isolamento real via bwrap (pula partes
 npm run test:processSandbox             # backend reduzido
 npm run test:sandboxManager             # decisão de backend + fail-closed
 npm run test:processManagerIntegration  # startBot()/stopBot() de ponta a ponta, de verdade
+npm run test:networkManager             # alocação de sub-rede/veth (pula se não houver nftables/CAP_NET_ADMIN)
 ```
 
 Ou tudo de uma vez com `npm test` (auto-descobre `tests/*.test.js`).
@@ -212,6 +239,14 @@ Esta mesma distinção é o motivo pelo qual `monitorManager.js` usa
 `sandbox.metrics()` (cgroup) em vez de `pidusage(pid externo)` pra medir
 RAM/CPU de bots no backend `linux` — medir o PID externo mediria só o
 supervisor (uso de recurso próximo de zero), não o processo real do bot.
+
+Pra confirmar a rede na unha, `sandbox.status().network` traz o
+`hostIp`/`botIp` alocados. De dentro do namespace de rede do bot (via
+`nsenter --net=/proc/$INNER_PID/ns/net -- ...`), uma requisição pra
+internet real deve funcionar, uma requisição pro `hostIp` do próprio
+Atlantic Host (ou pro `hostIp`/`botIp` de outro bot) deve falhar/travar —
+se qualquer uma dessas duas fizer o oposto, a rede restrita não está
+configurada corretamente.
 
 ### 5. Nunca confie só em "o bot está rodando" como prova de sandbox
 
