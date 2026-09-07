@@ -202,6 +202,12 @@ baixo nível de forma confiável (e certamente não impede um pacote nativo).
 - **Arquivo:** `src/managers/dependencyManager.js`, linhas 125–145
 - **Severidade:** CRITICAL
 - **Status:** **[ANÁLISE DE CÓDIGO — mecanismo trivialmente exploitável, não precisa de reprodução pra confirmar]**
+- **✅ CORRIGIDO** — auto-execução de `prisma generate`/`npm run build` removida
+  (revertida) de `dependencyManager.js`. Bots TypeScript/Prisma voltam a
+  precisar ser buildados fora da plataforma até existir um mecanismo real de
+  isolamento pro passo de build (ver Fase 3+/SandboxManager). Reaberto o
+  problema de deploy original, aceito conscientemente em troca de fechar a
+  execução de código arbitrário. Ver commit da correção.
 
 **Contexto:** numa sessão anterior desta mesma conversa, adicionei essas duas
 chamadas pra resolver um problema real (bots TypeScript/Prisma não

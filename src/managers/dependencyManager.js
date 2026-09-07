@@ -112,37 +112,20 @@ async function installDependencies(botId, folderPath) {
             addLog(botId, `📦 Node.js detectado. Instalando com ${pm}...`, 'stdout');
             success = (await runInstallCommand(botId, folderPath, command)) && success;
 
-            let pkg = null;
-            try { pkg = JSON.parse(fs.readFileSync(path.join(folderPath, 'package.json'), 'utf8')); } catch { /* ignore */ }
-
-            // Projetos com Prisma normalmente geram o client no "postinstall"
-            // (ex: "postinstall": "prisma generate") — mas isso é bloqueado
-            // pelo --ignore-scripts acima (proteção contra postinstall
-            // malicioso de dependência de terceiro). O schema Prisma é do
-            // PRÓPRIO bot, não de um pacote baixado, então rodamos `prisma
-            // generate` explicitamente quando detectado (dependência "prisma"
-            // ou "@prisma/client", ou schema.prisma presente).
-            if (success) {
-                const hasPrismaDep = !!(pkg?.dependencies?.prisma || pkg?.devDependencies?.prisma || pkg?.dependencies?.['@prisma/client']);
-                const hasPrismaSchema = exists(path.join(folderPath, 'prisma', 'schema.prisma'));
-                if (hasPrismaDep || hasPrismaSchema) {
-                    addLog(botId, '🔷 Prisma detectado. Gerando client (prisma generate)...', 'stdout');
-                    const npxCmd = pm === 'yarn' ? 'yarn prisma generate' : pm === 'pnpm' ? 'pnpm exec prisma generate' : 'npx --no-install prisma generate';
-                    success = (await runInstallCommand(botId, folderPath, npxCmd)) && success;
-                }
-            }
-
-            // Projetos TypeScript (ex: usam Prisma, imports estilo "./foo.js"
-            // dentro de arquivos .ts) precisam ser compilados antes de rodar —
-            // o Node não sabe mapear ".ts" -> ".js" sozinho. Só roda o script
-            // "build" que o PRÓPRIO bot declarou (não é código de terceiro
-            // baixado via npm — mesmo raciocínio já usado no `pip install -e .`
-            // acima), então não é afetado pela trava de --ignore-scripts.
-            if (success && pkg?.scripts?.build) {
-                const buildCmd = pm === 'npm' ? 'npm run build' : `${pm} run build`;
-                addLog(botId, '🔨 Script de build detectado no package.json. Compilando...', 'stdout');
-                success = (await runInstallCommand(botId, folderPath, buildCmd)) && success;
-            }
+            // CORREÇÃO DE SEGURANÇA (SECURITY_AUDIT.md, achado C4): esta versão
+            // chegou a rodar automaticamente `prisma generate` e `npm run
+            // build` aqui. Isso reabria execução de código arbitrário do
+            // cliente: o script "build" de um package.json pode ser QUALQUER
+            // comando de shell, executado via exec() direto no host, sem
+            // NENHUM isolamento (o security_wrapper.js só é aplicado na hora
+            // de RODAR o bot via spawn(), não durante o install/build). O
+            // raciocínio original ("é o schema/script do próprio bot, não de
+            // um pacote de terceiro") explica por que não é afetado por
+            // --ignore-scripts, mas não muda o fato de ser code execution
+            // completo. Removido até existir um mecanismo real de isolamento
+            // pro passo de build/deploy (ver SandboxManager, Fase 3+) — bots
+            // TypeScript/Prisma precisam ser buildados fora da plataforma e
+            // ter o "Arquivo principal" apontado pro JS já compilado.
         }
 
         // ── Python ───────────────────────────────────────────────────────────

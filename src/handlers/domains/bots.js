@@ -1079,7 +1079,7 @@ else if (customId.startsWith('config_reinstall_deps_')) {
         const restartNote = bot.status === 'online' ? '\n⚠️ Reinicie o bot para os arquivos recompilados entrarem em uso.' : '';
         await interaction.editReply({
             content: success
-                ? `${config.emojis.success} Dependências reinstaladas (npm/pip install, \`prisma generate\` e \`build\` quando detectados).${restartNote}`
+                ? `${config.emojis.success} Dependências reinstaladas (npm/pip install).${restartNote}`
                 : `${config.emojis.error} A reinstalação terminou com falha — confira os logs do bot (📜 Logs) para o erro exato.`,
         });
     } catch (err) {
