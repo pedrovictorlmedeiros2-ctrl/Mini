@@ -31,10 +31,17 @@ Concretamente, num bot rodando no backend `process`:
 - Limite de CPU depende de `cpulimit`/`nice` estarem instalados no host —
   sem eles, nenhum limite de CPU é aplicado (Windows não tem `cpulimit`
   nativo).
-- `fs.symlinkSync` não é interceptado — a função de Backup
-  (`backupManager.js`, achado C5) pode exfiltrar arquivos do host se um
-  bot plantar um symlink e o dono pedir um backup — **este achado
-  específico ainda não foi corrigido no código do backup**, só documentado.
+- `fs.symlinkSync` continua não interceptado (achado M1, ainda em
+  aberto) — um bot pode plantar um symlink dentro da própria pasta
+  livremente. **O que isso conseguia fazer de mais grave (achado C5:
+  exfiltrar arquivos do host via um Backup normal) já está corrigido** —
+  `backupManager.js` monta o zip com `addLocalFolderSafe()`
+  (`src/utils/safeZipFolder.js`), que nunca segue link simbólico ao
+  caminhar a pasta do bot, então o symlink em si continua podendo ser
+  criado, mas deixou de servir como vetor de exfiltração pelo backup.
+  Esta correção vale pros dois backends (`linux` e `process`) — a
+  vulnerabilidade estava no código de criação do backup em si, não no
+  isolamento do processo do bot.
 
 **Se o seu Atlantic Host roda em Windows hoje, isto é exatamente o nível
 de proteção que você tem** — decisão consciente e confirmada em conversa,
@@ -195,7 +202,7 @@ está realmente ativa" antes de confiar em produção**, não presuma.
 | Exaurir RAM do host | ⚠️ não validado neste ambiente (cgroup `memory.max`) | ⚠️ só watchdog reativo |
 | Exaurir CPU do host | ⚠️ não validado neste ambiente (cgroup `cpu.max`) | ⚠️ só se `cpulimit`/`nice` disponíveis |
 | Exaurir disco do host | ❌ (sem quota, nenhum backend) | ❌ |
-| Exfiltrar host via Backup (symlink) | ⚠️ ainda explorável (achado C5, não corrigido) | ⚠️ idem |
+| Exfiltrar host via Backup (symlink) | ✅ corrigido (achado C5 — `addLocalFolderSafe`, ver `SECURITY_AUDIT.md`) | ✅ idem |
 
 ---
 
@@ -215,6 +222,11 @@ quando:** roda em Windows, ou em Linux sem os requisitos do backend
 `linux` — nesse caso, é o backend `process`, com todas as lacunas do
 `SECURITY_AUDIT.md` ainda presentes.
 
-**Não corrigido em nenhum backend:** exfiltração via símlink na função de
-Backup (achado C5) — item isolado, correção pequena e ainda pendente,
-independente do backend de sandbox escolhido.
+**Corrigido em ambos os backends:** exfiltração via symlink na função de
+Backup (achado C5) — `backupManager.js` agora monta o zip com
+`addLocalFolderSafe()`, que nunca segue link simbólico. Correção
+independente do backend de sandbox escolhido (o bug estava na criação do
+backup em si, não no isolamento do processo do bot). M1 (`fs.symlinkSync`
+livre) continua em aberto como item separado — a criação do symlink em si
+ainda não é bloqueada, só deixou de servir como vetor de exfiltração pelo
+backup.

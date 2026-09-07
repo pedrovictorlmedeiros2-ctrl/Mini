@@ -31,8 +31,9 @@
     "test:sandboxManager": "node --test tests/sandboxManager.test.js",
     "test:processManagerIntegration": "node --test tests/processManagerSandboxIntegration.test.js",
     "test:networkManager": "node --test tests/networkManager.test.js",
+    "test:safeZipFolder": "node --test tests/safeZipFolder.test.js",
     "build:bot-images": "sh scripts/build-bot-images.sh",
-    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js tests/processSandboxBackend.test.js tests/sandboxManager.test.js tests/processManagerSandboxIntegration.test.js tests/networkManager.test.js"
+    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js tests/processSandboxBackend.test.js tests/sandboxManager.test.js tests/processManagerSandboxIntegration.test.js tests/networkManager.test.js tests/safeZipFolder.test.js"
   },
   "keywords": [
     "discord",

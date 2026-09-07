@@ -260,6 +260,21 @@ código não confiável.
 - **Arquivos:** `src/managers/backupManager.js` linha 59 (`zip.addLocalFolder(sourcePath)`); raiz do problema em `node_modules/adm-zip/util/utils.js` (`findFiles`/`findFilesAsync`, que usa `fs.statSync` — que SEGUE symlink — pra decidir se desce num diretório)
 - **Severidade:** CRITICAL
 - **Status:** **[CONFIRMADO AO VIVO]**
+- **✅ CORRIGIDO** — `zip.addLocalFolder(sourcePath)` foi substituído por
+  `addLocalFolderSafe()` (novo módulo `src/utils/safeZipFolder.js`), que
+  caminha a árvore com `fs.lstatSync` (NÃO segue symlink) e pula qualquer
+  entrada que seja um link simbólico — nunca lê nem inclui o alvo, então não
+  importa pra onde o link aponte. Reproduzido ao vivo antes e depois da
+  correção (mesmo cenário de ataque abaixo: symlink pra um `.env` fora da
+  pasta do bot deixa de aparecer no zip). Teste de regressão em
+  `tests/safeZipFolder.test.js` (inclui symlink raso, symlink-pra-arquivo,
+  symlink várias pastas abaixo da raiz, e uma checagem de código-fonte que
+  falha se `zip.addLocalFolder` voltar a ser chamado em `backupManager.js`).
+  M1 (`fs.symlinkSync`/`linkSync` livres no `security_wrapper.js`, apontado
+  como causa raiz) **continua em aberto** — a correção aqui é robusta por si
+  só (não depende de impedir a criação do symlink, só de nunca segui-lo na
+  hora de montar o zip), mas M1 é um item separado, não fechado nesta
+  correção.
 
 **Cenário de ataque:** nada no `security_wrapper.js` impede um bot de chamar
 `fs.symlinkSync(alvo, nomeDentroDaPastaDoBot)` (não está na lista de métodos
@@ -519,7 +534,7 @@ especificamente e estão corretos hoje:
 | C2 | `process.kill` não interceptado | CRITICAL | Ao vivo (mecanismo) |
 | C3 | Sem política de rede | CRITICAL | Ao vivo |
 | C4 | `npm run build`/`prisma generate` sem sandbox | CRITICAL | Código (regressão desta sessão) |
-| C5 | Backup segue symlink, exfiltra host | CRITICAL | Ao vivo |
+| C5 | Backup segue symlink, exfiltra host | CRITICAL | Ao vivo — **✅ corrigido** |
 | C6 | Deny-list de módulo não cobre pacotes npm/addons nativos | CRITICAL | Código (estrutural) |
 | H1 | TOCTOU em `assertInsideBotDir` | HIGH | Código |
 | H2 | Segredo de webhook GitHub global | HIGH | Código (conhecido) |

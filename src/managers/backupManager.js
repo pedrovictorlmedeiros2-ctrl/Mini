@@ -16,6 +16,7 @@ const { addToQueue } = require('./queueManager');
 const { encryptBuffer, decryptBuffer, sha256 } = require('../utils/fileCrypto');
 const { pushBackupOffsite } = require('./offsiteBackup');
 const { validateZipEntries } = require('../utils/zipValidation');
+const { addLocalFolderSafe } = require('../utils/safeZipFolder');
 
 /**
  * Garante que a pasta de backups existe antes de qualquer operação
@@ -55,8 +56,21 @@ async function createBackup(botId, type = 'manual') {
 
         // Monta o ZIP inteiro em memória (não precisa tocar o disco em texto
         // puro em nenhum momento) e só então criptografa o resultado.
+        //
+        // CORREÇÃO DE SEGURANÇA CRÍTICA (achado C5): zip.addLocalFolder()
+        // usa fs.statSync (SEGUE symlink) pra decidir se desce num diretório
+        // — um bot plantando um link simbólico dentro da própria pasta
+        // apontando pro host conseguia exfiltrar qualquer arquivo legível
+        // pelo processo (incluindo o .env real) via um Backup normal.
+        // addLocalFolderSafe() caminha com fs.lstatSync (NÃO segue symlink)
+        // e pula qualquer link — nunca inclui o alvo, veja
+        // src/utils/safeZipFolder.js e SECURITY_AUDIT.md.
         const zip = new AdmZip();
-        zip.addLocalFolder(sourcePath);
+        addLocalFolderSafe(zip, sourcePath, {
+            onSkippedSymlink: (relPath) => {
+                console.warn(`[BACKUP] link simbólico ignorado (possível tentativa de exfiltração) no bot ${botId}: ${relPath}`);
+            },
+        });
         const plainBuffer = zip.toBuffer();
 
         const checksum = sha256(plainBuffer);
