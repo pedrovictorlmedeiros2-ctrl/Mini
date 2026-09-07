@@ -56,6 +56,21 @@ function cpuMaxValue(cpuPercent) {
     return `${quota} ${period}`;
 }
 
+// CORREÇÃO DE SEGURANÇA (auditoria da Fase 3): `id` é usado pra montar o
+// caminho do diretório de cgroup via path.join(parent, id). path.join()
+// NÃO impede '..' — um id malicioso tipo '../../../../tmp/evil' faz
+// create() tentar mkdir/escrever fora da árvore de cgroup pretendida.
+// Hoje quem chama esta classe usa generateId() (seguro), mas a classe em
+// si não validava nada — corrigido aqui, na fronteira, pra não depender de
+// todo chamador futuro lembrar de validar.
+const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+function assertSafeId(id) {
+    if (typeof id !== 'string' || !SAFE_ID_PATTERN.test(id)) {
+        throw new Error(`id de sandbox inválido: ${JSON.stringify(id)} — só letras, números, '_' e '-' são aceitos (máx 64 caracteres), pra impedir path traversal no diretório de cgroup.`);
+    }
+}
+
 class LinuxSandboxBackend extends EventEmitter {
     /**
      * @param {object} spec
@@ -69,6 +84,7 @@ class LinuxSandboxBackend extends EventEmitter {
      */
     constructor(spec) {
         super();
+        assertSafeId(spec.id);
         this.id = spec.id;
         this.folderPath = path.resolve(spec.folderPath);
         this.command = spec.command;
@@ -117,10 +133,22 @@ class LinuxSandboxBackend extends EventEmitter {
             try { fs.rmdirSync(this.cgroupDir); } catch { /* segue, vai falhar no mkdir se realmente estiver em uso */ }
         }
         fs.mkdirSync(this.cgroupDir);
-        fs.writeFileSync(path.join(this.cgroupDir, 'memory.max'), String(this.limits.memoryMB * 1024 * 1024));
-        fs.writeFileSync(path.join(this.cgroupDir, 'memory.swap.max'), '0');
-        fs.writeFileSync(path.join(this.cgroupDir, 'pids.max'), String(this.limits.pids));
-        fs.writeFileSync(path.join(this.cgroupDir, 'cpu.max'), cpuMaxValue(this.limits.cpuPercent));
+
+        // CORREÇÃO (auditoria da Fase 3): se qualquer uma destas escritas
+        // falhar (ex: swap accounting desligado no kernel, permissão
+        // inesperada), o diretório de cgroup já criado ficava pra trás sem
+        // limpeza — um resquício órfão a cada falha. Agora qualquer falha
+        // aqui remove o diretório antes de propagar o erro.
+        try {
+            fs.writeFileSync(path.join(this.cgroupDir, 'memory.max'), String(this.limits.memoryMB * 1024 * 1024));
+            fs.writeFileSync(path.join(this.cgroupDir, 'memory.swap.max'), '0');
+            fs.writeFileSync(path.join(this.cgroupDir, 'pids.max'), String(this.limits.pids));
+            fs.writeFileSync(path.join(this.cgroupDir, 'cpu.max'), cpuMaxValue(this.limits.cpuPercent));
+        } catch (err) {
+            try { fs.rmdirSync(this.cgroupDir); } catch { /* best effort */ }
+            this.cgroupDir = null;
+            throw new Error(`Falha ao aplicar limites de cgroup — sandbox não criado (fail-closed): ${err.message}`);
+        }
 
         this.state = 'created';
     }
@@ -130,21 +158,43 @@ class LinuxSandboxBackend extends EventEmitter {
         // posterior pode ESCONDER um mount anterior se for num caminho pai
         // (ex: `--tmpfs /tmp` depois de `--bind /tmp/bot-x /tmp/bot-x`
         // apaga o bind anterior, porque /tmp/bot-x fica dentro de /tmp).
-        // Por isso o `--tmpfs /tmp` genérico vem ANTES do bind específico
-        // da pasta do bot — assim o bind da pasta do bot fica por cima,
-        // mesmo se ela morar (por acidente de configuração) dentro de /tmp.
-        // Confirmado com reprodução real: a ordem errada quebra até o
+        // Confirmado com reprodução real: a ordem errada chega a quebrar o
         // `--chdir` (bwrap: "Can't chdir to ...: No such file or directory").
+        // Por isso todo mount "genérico" (--proc, --dev, --tmpfs /tmp) vem
+        // ANTES de qualquer bind específico (pasta do bot, dir do binário
+        // node) — assim os binds específicos sempre ficam por cima, não
+        // importa se algum deles mora (por acidente de configuração)
+        // dentro de /tmp.
         const args = [
             '--unshare-all',
             '--die-with-parent',
             '--new-session',
-            ...buildBaseSystemBindArgs(),
-            '--ro-bind', path.dirname(this.command), path.dirname(this.command), // dir do binário (node), sem assumir que mora em /usr
+            // CORREÇÃO DE SEGURANÇA (auditoria da Fase 3): sem --cap-drop
+            // ALL, o CapBnd (bounding set) do sandbox herdava o bounding
+            // set inteiro do processo que invoca o bwrap — confirmado ao
+            // vivo mostrando CapBnd quase completo mesmo com CapEff/CapPrm
+            // zerados. --cap-drop ALL zera as 4 (Inh/Prm/Eff/Bnd),
+            // confirmado com teste real. Sem isto, um bug de kernel ou um
+            // binário com file capability setada poderia reativar
+            // capabilities que o bounding set ainda permitia.
+            '--cap-drop', 'ALL',
+            // Hostname próprio (não o do host) — sem isto, o hostname real
+            // do host vazava pra dentro do sandbox (UTS namespace existe,
+            // mas por padrão herda o valor atual, não gera um novo).
+            '--hostname', `sandbox-${this.id}`.slice(0, 64),
+            // CORREÇÃO (auditoria da Fase 3): --tmpfs /tmp genérico vem
+            // ANTES de QUALQUER bind específico (não só o da pasta do bot,
+            // como estava antes) — se o binário do node (ou qualquer outro
+            // caminho bindado depois) morar dentro de /tmp por algum motivo
+            // (builds portáteis, ambientes efêmeros), um --tmpfs /tmp
+            // posterior o esconderia do mesmo jeito que escondia a pasta do
+            // bot antes desta correção.
             '--proc', '/proc',
             '--dev', '/dev',
             '--tmpfs', '/tmp',
-            '--bind', this.folderPath, this.folderPath, // pasta do bot: leitura E escrita — depois do tmpfs genérico, de propósito
+            ...buildBaseSystemBindArgs(),
+            '--ro-bind', path.dirname(this.command), path.dirname(this.command), // dir do binário (node), sem assumir que mora em /usr
+            '--bind', this.folderPath, this.folderPath, // pasta do bot: leitura E escrita
             '--chdir', this.folderPath,
             '--uid', String(this.uid),
             '--gid', String(this.gid),
@@ -212,6 +262,18 @@ class LinuxSandboxBackend extends EventEmitter {
 
     /**
      * Para o processo: SIGTERM, escalando pra SIGKILL se não sair a tempo.
+     *
+     * CORREÇÃO (auditoria da Fase 3 — race condition real): esta função
+     * mandava SIGKILL e RETORNAVA na hora, sem confirmar que o processo já
+     * tinha morrido de verdade (o evento 'exit' do child_process é
+     * assíncrono — o kernel ainda pode levar um instante pra terminar de
+     * limpar o processo depois do SIGKILL). destroy() chamava stop() e
+     * IMEDIATAMENTE tentava remover o diretório de cgroup — se o processo
+     * ainda não tivesse sido totalmente colhido pelo kernel, `cgroup.procs`
+     * ainda não estava vazio, e rmdirSync falhava com EBUSY, deixando um
+     * diretório de cgroup órfão pra sempre (nada tentava de novo depois).
+     * Agora esperamos de verdade o estado virar 'exited' também depois do
+     * SIGKILL, com um teto de tempo pra nunca travar indefinidamente.
      */
     async stop(timeoutMs = 5000) {
         if (this.state !== 'running') return;
@@ -222,6 +284,10 @@ class LinuxSandboxBackend extends EventEmitter {
         }
         if (this.state === 'running') {
             this._kill('SIGKILL');
+            const killDeadline = Date.now() + 2000;
+            while (this.state === 'running' && Date.now() < killDeadline) {
+                await new Promise((r) => setTimeout(r, 100));
+            }
         }
     }
 
@@ -234,11 +300,33 @@ class LinuxSandboxBackend extends EventEmitter {
     /**
      * Encerra e libera todos os recursos (cgroup). Depois de destroy(), a
      * instância não pode ser reaproveitada — crie uma nova.
+     *
+     * CORREÇÃO (auditoria da Fase 3): stop() agora só retorna depois de
+     * confirmar 'exited' (ver comentário lá), então na maioria dos casos
+     * cgroup.procs já está vazio aqui. Mesmo assim, uma única tentativa de
+     * rmdirSync engolida em silêncio deixava um diretório de cgroup órfão
+     * pra sempre se algo demorasse um pouco mais (kernel ainda liberando
+     * recursos). Agora tenta algumas vezes com um pequeno intervalo antes
+     * de desistir, e avisa no console se mesmo assim não conseguir — nunca
+     * falha silenciosamente a ponto de ninguém saber que há um cgroup
+     * vazando.
      */
     async destroy() {
         await this.stop();
         if (this.cgroupDir && fs.existsSync(this.cgroupDir)) {
-            try { fs.rmdirSync(this.cgroupDir); } catch { /* pode falhar se ainda houver processo residual — best effort */ }
+            const dir = this.cgroupDir;
+            let removed = false;
+            for (let attempt = 0; attempt < 5 && !removed; attempt++) {
+                try {
+                    fs.rmdirSync(dir);
+                    removed = true;
+                } catch {
+                    await new Promise((r) => setTimeout(r, 200));
+                }
+            }
+            if (!removed) {
+                console.error(`[LinuxSandboxBackend] Não foi possível remover o cgroup ${dir} após destroy() — pode haver processo residual. Verificação manual recomendada.`);
+            }
         }
         this.state = 'destroyed';
     }

@@ -27,7 +27,7 @@ const bwrapWorks = caps.isLinux && caps.bwrap.available && caps.userNamespaces.a
 
 function makeBackend(overrides = {}) {
     return new LinuxSandboxBackend({
-        id: 'test-' + Math.random().toString(36).slice(2),
+        id: overrides.id ?? ('test-' + Math.random().toString(36).slice(2)),
         folderPath: overrides.folderPath || fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-test-')),
         command: process.execPath,
         args: overrides.args || ['-e', 'console.log("ok")'],
@@ -175,6 +175,55 @@ test('LIMITE DE RECURSO (cgroup v2): pids.max impede fork bomb dentro do sandbox
     assert.ok(match, `esperava ver a contagem no log, saída: ${logs}`);
     assert.ok(Number(match[1]) < 500, 'pids.max deveria ter impedido de criar todos os 500 processos');
     await backend.destroy();
+});
+
+test('REGRESSÃO (auditoria Fase 3): id com path traversal é rejeitado no construtor — impede escapar do diretório de cgroup', () => {
+    const maliciousIds = ['../../../../tmp/evil', '/etc/passwd', 'a/b', 'a b', '', 'x'.repeat(65)];
+    for (const id of maliciousIds) {
+        assert.throws(
+            () => makeBackend({ id }),
+            /id de sandbox inválido/,
+            `id ${JSON.stringify(id)} deveria ter sido rejeitado`
+        );
+    }
+    // ids legítimos (o formato real usado por generateId()) continuam funcionando
+    assert.doesNotThrow(() => makeBackend({ id: 'bot-abc123_XYZ' }));
+});
+
+test('REGRESSÃO (auditoria Fase 3): CapBnd (bounding set) fica zerado, não só CapEff/CapPrm', { skip: !bwrapWorks }, () => {
+    const backend = makeBackend({ args: ['-e', `console.log(require('fs').readFileSync('/proc/self/status','utf8').split('\\n').filter(l => l.startsWith('Cap')).join('|'))`] });
+    const out = execFileSync('bwrap', backend._buildBwrapArgs(), { timeout: 8000 }).toString();
+    for (const field of ['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb']) {
+        assert.match(out, new RegExp(`${field}:\\s*0000000000000000`), `${field} deveria estar zerado, saída: ${out}`);
+    }
+});
+
+test('REGRESSÃO (auditoria Fase 3): hostname dentro do sandbox é próprio, não o do host real', { skip: !bwrapWorks }, () => {
+    const realHostname = os.hostname();
+    const backend = makeBackend({ args: ['-e', `console.log(require('os').hostname())`] });
+    const out = execFileSync('bwrap', backend._buildBwrapArgs(), { timeout: 8000 }).toString().trim();
+    assert.notEqual(out, realHostname, 'hostname do sandbox não deveria vazar o hostname real do host');
+    assert.ok(out.startsWith('sandbox-'), `esperava hostname prefixado 'sandbox-', veio: ${out}`);
+});
+
+test('REGRESSÃO (auditoria Fase 3): stop() só retorna depois do processo realmente morrer (evita corrida com destroy()/rmdir do cgroup)', { skip: !bwrapWorks }, async () => {
+    const backend = makeBackend({ args: ['-e', 'setInterval(() => {}, 1000)'] }); // fica vivo até ser morto
+    const bwrapArgs = backend._buildBwrapArgs();
+    const { spawn } = require('child_process');
+    // Bypassa create() (que exige cgroup v2 real) só pra testar stop()
+    // isoladamente — start() de verdade é coberto pelos testes de recurso
+    // acima, que dependem de cgroup.
+    backend.child = spawn('bwrap', bwrapArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    backend.state = 'running';
+    backend.child.on('exit', () => { backend.state = 'exited'; });
+
+    await new Promise((r) => setTimeout(r, 300)); // dá tempo do processo subir de verdade
+
+    await backend.stop(1000); // timeout curto, força escalar pra SIGKILL
+
+    assert.equal(backend.state, 'exited', 'stop() deveria só retornar depois do processo realmente sair, não na hora do kill()');
+    // confirma independentemente que o PID de fato não existe mais no host
+    assert.throws(() => process.kill(backend.child.pid, 0), 'o processo deveria estar morto de verdade no SO, não só marcado como tal internamente');
 });
 
 test('status()/logs()/metrics() antes de start() não quebram (estado idle/created)', () => {
