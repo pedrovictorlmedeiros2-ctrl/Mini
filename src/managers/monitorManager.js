@@ -45,7 +45,36 @@ function startMonitoring(intervalMs) {
                     continue;
                 }
 
-                const stats = await pidusage(entry.process.pid);
+                // CORREÇÃO (integração do SandboxManager): quando o bot roda
+                // no LinuxSandboxBackend, entry.process.pid é o PID do
+                // supervisor bwrap, não o processo real do bot (que vive
+                // como PID separado DENTRO do PID namespace do sandbox,
+                // invisível pro Node que só rastreia o processo que ele
+                // mesmo criou). pidusage(pid do bwrap) mediria só o
+                // supervisor — praticamente ocioso — dando uma leitura de
+                // RAM/CPU falsamente baixa. O cgroup v2 tem a contagem
+                // CORRETA (memory.current é o total real do processo lá
+                // dentro), então usamos ela quando disponível. CPU não é
+                // recalculada a partir de cpu.stat aqui (precisaria de
+                // amostragem por delta de tempo, escopo maior) — mas isso
+                // não é uma lacuna de segurança: o cgroup cpu.max já limita
+                // o uso de CPU diretamente no kernel, então esse watchdog
+                // (que reage por polling) é só uma camada redundante nesse
+                // caso, não a única linha de defesa como é no modo reduzido.
+                const usingKernelSandbox = entry.sandbox && typeof entry.sandbox.metrics === 'function' && entry.sandbox.status?.().backend === 'linux';
+
+                let cpuUsage = null;
+                let ramUsageMB;
+
+                if (usingKernelSandbox) {
+                    const m = entry.sandbox.metrics();
+                    if (!m || m.memoryCurrentBytes == null) continue; // cgroup ainda não populado neste ciclo
+                    ramUsageMB = m.memoryCurrentBytes / 1024 / 1024;
+                } else {
+                    const stats = await pidusage(entry.process.pid);
+                    cpuUsage = stats.cpu;
+                    ramUsageMB = stats.memory / 1024 / 1024;
+                }
 
                 // Limites efetivos: override do bot > plano do dono > default global
                 const limits = get(
@@ -58,17 +87,16 @@ function startMonitoring(intervalMs) {
                     [config.security.maxCpuPerBot, config.security.maxRamPerBot, botId]
                 );
 
-                const cpuUsage = stats.cpu;
-                const ramUsageMB = stats.memory / 1024 / 1024;
-
                 if (!biggestRamBot || ramUsageMB > biggestRamBot.ramUsageMB) {
                     biggestRamBot = { botId, ramUsageMB };
                 }
 
-                // Atualiza no banco
+                // Atualiza no banco (cpu_usage fica null quando medido via
+                // kernel sandbox — não temos %CPU calculada nesse caso, mas
+                // não fingimos um número que não temos)
                 run(
                     "UPDATE bots SET cpu_usage = ?, ram_usage = ?, last_activity = datetime('now') WHERE id = ?",
-                    [cpuUsage.toFixed(1), ramUsageMB.toFixed(1), botId]
+                    [cpuUsage != null ? cpuUsage.toFixed(1) : null, ramUsageMB.toFixed(1), botId]
                 );
 
                 if (!limits) continue;
@@ -89,8 +117,10 @@ function startMonitoring(intervalMs) {
                     warnReason = `RAM alta: ${ramUsageMB.toFixed(1)}MB de ${maxRam}MB (${((ramUsageMB / maxRam) * 100).toFixed(0)}%)`;
                 }
 
-                // ── CPU ──────────────────────────────────────────────────────
-                if (!killReason) {
+                // ── CPU ────────────────────────────────────────────────────
+                // Pulado quando cpuUsage é null (backend 'linux'): o cgroup
+                // cpu.max já limita isso diretamente no kernel.
+                if (!killReason && cpuUsage != null) {
                     if (cpuUsage > maxCpu) {
                         // Picos curtos são tolerados. Só mata no 2º ciclo seguido.
                         if (!entry.cpuExceeded) {

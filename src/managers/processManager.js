@@ -23,6 +23,7 @@ const config = require('../../config');
 const { addLog } = require('./consoleManager');
 const { alertBotCrash } = require('./alertManager');
 const { updateHealth, markCrashLoop } = require('./healthManager');
+const { decideBackend, createSandbox } = require('./sandbox/SandboxManager');
 
 // ── MAPAS DE ESTADO ────────────────────────────────────────────────────────────
 // botId → { process, startTime, logs[] }
@@ -466,12 +467,21 @@ async function startBot(botId) {
     // Não substitui isolamento por container/cgroup, mas reduz bastante a janela
     // de exposição em relação a depender só do watchdog por polling.
 
+    // NOVO: decide qual backend de isolamento este host pode oferecer ANTES
+    // de montar os argumentos finais — a decisão afeta o que é injetado
+    // (security_wrapper.js e cpulimit/nice só fazem sentido pro backend
+    // 'process'; o backend 'linux' usa isolamento de kernel real e cgroup
+    // pra limite de CPU, então não precisa de nenhum dos dois). Minecraft
+    // (Java) continua fora do SandboxManager por enquanto — ver comentário
+    // mais abaixo.
+    let sandboxDecision = null;
+
     // Configuração específica por tipo de aplicação
     if (bot.type === 'minecraft') {
         const javaCmd = bot.java_version ? `java${bot.java_version}` : 'java';
         const ram = bot.max_memory || 2048;
         const jarFile = bot.main_file || 'server.jar';
-        
+
         // Aceita EULA automaticamente se não existir
         const eulaPath = path.join(folderPath, 'eula.txt');
         if (!fs.existsSync(eulaPath)) fs.writeFileSync(eulaPath, 'eula=true');
@@ -482,6 +492,15 @@ async function startBot(botId) {
             '-jar', jarFile, 'nogui'
         ];
     } else {
+        // CORREÇÃO DE SEGURANÇA: esta é a fronteira real de isolamento pra
+        // bots Node/Python. Nunca decida isolamento aqui dentro — só
+        // SandboxManager.decideBackend() decide, e nunca cai silenciosamente
+        // pro modo reduzido no Linux (fail-closed, ver SandboxManager.js).
+        sandboxDecision = decideBackend();
+        if (!sandboxDecision.name) {
+            throw new Error(sandboxDecision.reason);
+        }
+
         const isPython = bot.language === 'python';
         const mainFile = bot.main_file || (isPython ? 'main.py' : 'index.js');
         const mainFilePath = path.join(folderPath, mainFile);
@@ -514,29 +533,70 @@ async function startBot(botId) {
         } else {
             baseCmd = resolveNodeBinary(bot.node_version, botId);
         }
+
+        // security_wrapper.js só é injetado no backend 'process' (reduzido)
+        // — no backend 'linux', o isolamento de kernel já cobre o que ele
+        // tenta cobrir (e melhor: sem os buracos documentados no
+        // SECURITY_AUDIT.md), e manter o wrapper ligado bloquearia usos
+        // legítimos de child_process (ex: bots de música chamando ffmpeg)
+        // que já são seguros dentro do sandbox de kernel.
+        const useReducedWrapper = sandboxDecision.name === 'process';
         const baseArgs = isPython
             ? [mainFilePath]
-            : [`--max-old-space-size=${ramLimitMB}`, '--require', securityWrapperPath, mainFilePath];
+            : [
+                `--max-old-space-size=${ramLimitMB}`,
+                ...(useReducedWrapper ? ['--require', securityWrapperPath] : []),
+                mainFilePath,
+            ];
 
-        // Monta a cadeia de wrappers disponíveis: cpulimit > nice > direto
-        if (CPULIMIT_AVAILABLE) {
-            command = 'cpulimit';
-            args = ['-l', String(cpuLimitPct), '--', baseCmd, ...baseArgs];
-        } else if (NICE_AVAILABLE) {
-            command = 'nice';
-            args = ['-n', '15', baseCmd, ...baseArgs];
+        if (useReducedWrapper) {
+            // Monta a cadeia de wrappers disponíveis: cpulimit > nice > direto
+            // (só faz sentido no modo reduzido — o backend 'linux' já limita
+            // CPU via cgroup cpu.max, mais confiável que nice/cpulimit).
+            if (CPULIMIT_AVAILABLE) {
+                command = 'cpulimit';
+                args = ['-l', String(cpuLimitPct), '--', baseCmd, ...baseArgs];
+            } else if (NICE_AVAILABLE) {
+                command = 'nice';
+                args = ['-n', '15', baseCmd, ...baseArgs];
+            } else {
+                command = baseCmd;
+                args = baseArgs;
+            }
         } else {
             command = baseCmd;
             args = baseArgs;
         }
     }
 
-    const proc = spawn(command, args, {
-        cwd: folderPath,
-        env: botEnv,
-        detached: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let proc;
+    let sandboxInstance = null;
+
+    if (bot.type === 'minecraft') {
+        // Minecraft (Java) ainda não passa pelo SandboxManager — fica de
+        // fora desta refatoração de propósito (ver relatório da
+        // integração). Continua exatamente como antes: spawn direto.
+        proc = spawn(command, args, {
+            cwd: folderPath,
+            env: botEnv,
+            detached: false,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+    } else {
+        sandboxInstance = await createSandbox(sandboxDecision, {
+            id: botId,
+            folderPath,
+            command,
+            args,
+            env: botEnv,
+            limits: {
+                memoryMB: ramLimitMB,
+                cpuPercent: cpuLimitPct,
+                pids: config.security.maxPidsPerBot || 100,
+            },
+        });
+        proc = await sandboxInstance.start();
+    }
 
     // CORREÇÃO: o listener de erro do processo precisa ser registrado JÁ AQUI,
     // logo depois do spawn(). Antes ficava lá embaixo, depois do run() que usa
@@ -557,6 +617,7 @@ async function startBot(botId) {
     // Registra no mapa de processos ativos (com RAM reservada pro guard do host)
     activeProcesses.set(botId, {
         process: proc,
+        sandbox: sandboxInstance,
         startTime: Date.now(),
         logs: [],
         reservedRamMB: neededRam,
@@ -688,6 +749,24 @@ function stopBot(botId) {
         return true;
     }
 
+    // CORREÇÃO (integração do SandboxManager): quando o bot foi iniciado via
+    // sandbox (backend 'linux' ou 'process'), o encerramento tem que passar
+    // pelo destroy() da PRÓPRIA instância — ela sabe esperar o processo
+    // realmente morrer antes de tentar liberar o cgroup (ver auditoria do
+    // LinuxSandboxBackend). Matar só o processo direto (como no fallback
+    // abaixo) deixaria o diretório de cgroup vazando toda vez.
+    if (active.sandbox) {
+        active.sandbox.destroy()
+            .catch((err) => console.error(`[STOP] Erro ao destruir sandbox do bot ${botId}:`, err.message))
+            .finally(() => {
+                activeProcesses.delete(botId);
+                run('UPDATE bots SET status = ?, pid = NULL WHERE id = ?', ['offline', botId]);
+            });
+        return true;
+    }
+
+    // Fallback (bots iniciados sem sandbox — hoje, só Minecraft/Java):
+    // mesma lógica de sempre, sem sandbox pra limpar.
     try {
         active.process.kill('SIGTERM');
     } catch {
