@@ -14,6 +14,12 @@ const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { query } = require('../database/database');
 const app = express();
+// Mitigação de CVE moderado em `qs` (dependência do Express 4 pra parsing de
+// query string, sem patch disponível sem quebrar pro Express 5): esta rota
+// nunca precisa de objetos aninhados na query string, então usamos o parser
+// simples nativo do Node (querystring), que não tem o código vulnerável.
+app.set('query parser', 'simple');
+app.disable('x-powered-by');
 
 // Cache de middlewares de proxy já criados, indexados pela porta de destino.
 const proxyCache = new Map();

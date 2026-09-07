@@ -17,6 +17,8 @@ const { checkRateLimit } = require('../utils/rateLimiter');
 const { detectLanguageAndMainFile, flattenSingleSubfolder } = require('../utils/languageDetector');
 
 const app = express();
+app.set('query parser', 'simple'); // mitigação de CVE moderado em `qs`, ver proxyManager.js
+app.disable('x-powered-by');
 
 // ── VALIDAÇÃO DE ENTRADA (essencial: repoUrl/branch/hash vêm do usuário) ──────
 // CORREÇÃO/PRINCÍPIO DE SEGURANÇA: todas as funções abaixo chamam `git` via

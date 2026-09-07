@@ -12,8 +12,22 @@
  */
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 const os = require('os');
 const si = require('systeminformation');
+
+function isValidSecret(provided, expected) {
+    if (typeof provided !== 'string' || !provided) return false;
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) {
+        // Compara contra um dummy de mesmo tamanho pra não vazar o tamanho
+        // real do secret por diferença de tempo.
+        crypto.timingSafeEqual(a, Buffer.alloc(a.length));
+        return false;
+    }
+    return crypto.timingSafeEqual(a, b);
+}
 
 let server = null;
 let heartbeatTimer = null;
@@ -57,13 +71,15 @@ function startWorkerAgent(options = {}) {
     }
 
     const app = express();
+    app.set('query parser', 'simple'); // mitigação de CVE moderado em `qs`, ver proxyManager.js
+    app.disable('x-powered-by');
     app.use(express.json({ limit: '1mb' }));
 
     // Auth por secret compartilhado
     app.use((req, res, next) => {
         if (req.path === '/health') return next();
         const provided = req.body?.secret || req.headers['x-node-secret'];
-        if (provided !== secret) {
+        if (!isValidSecret(provided, secret)) {
             return res.status(401).json({ error: 'unauthorized' });
         }
         next();

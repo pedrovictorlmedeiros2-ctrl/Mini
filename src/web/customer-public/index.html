@@ -291,8 +291,11 @@ async function boot() {
 }
 
 function renderUserRow() {
+  // esc() aqui é defesa em profundidade: currentUser.id/avatar vêm da API do
+  // Discord (hash hex normal), mas nunca inserimos dado de API externa direto
+  // num atributo HTML sem escapar, mesmo que a origem seja "confiável" hoje.
   const avatarUrl = currentUser.avatar
-    ? `https://cdn.discordapp.com/avatars/${currentUser.id}/${currentUser.avatar}.png?size=64`
+    ? `https://cdn.discordapp.com/avatars/${esc(currentUser.id)}/${esc(currentUser.avatar)}.png?size=64`
     : 'https://cdn.discordapp.com/embed/avatars/0.png';
   $('user-row').innerHTML = `
     <img src="${avatarUrl}" alt="">

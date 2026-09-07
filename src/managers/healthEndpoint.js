@@ -5,6 +5,8 @@ let server = null;
 
 function startHealthEndpoint(port = 3001) {
     const app = express();
+    app.set('query parser', 'simple'); // mitigação de CVE moderado em `qs`, ver proxyManager.js
+    app.disable('x-powered-by');
     const bindHost = process.env.HEALTH_HOST || '0.0.0.0';
     app.use(express.json({ limit: '256kb' }));
 

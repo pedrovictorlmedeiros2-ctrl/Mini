@@ -155,3 +155,35 @@ test('colaborador só ganha as permissões explicitamente concedidas (sem "files
     const write = await req('PUT', '/api/bots/bot-1/files/content', { token: malloryToken, body: { path: 'index.js', content: 'x' } });
     assert.strictEqual(write.status, 404, 'colaborador sem "files" não pode escrever arquivos');
 });
+
+test('console SSE tem limite de conexões simultâneas por usuário (protege o processo compartilhado)', async () => {
+    // O painel roda no mesmo processo Node do bot Discord e de todo o resto —
+    // sem limite, um usuário sozinho poderia abrir conexões SSE ilimitadas e
+    // degradar o processo pra todo mundo. Confirma que a 6ª conexão do mesmo
+    // usuário é rejeitada com 429, sem derrubar as 5 anteriores.
+    const sockets = [];
+    const openStream = () => new Promise((resolve, reject) => {
+        const request = http.request(`${baseUrl}/api/bots/bot-1/console/stream`, {
+            method: 'GET',
+            headers: { Cookie: `atlantic_session=${eveToken}` },
+        }, (res) => {
+            resolve(res.statusCode);
+        });
+        request.on('error', reject);
+        request.end();
+        sockets.push(request);
+    });
+
+    try {
+        const statuses = [];
+        for (let i = 0; i < 6; i++) {
+            statuses.push(await openStream());
+        }
+        assert.strictEqual(statuses.filter((s) => s === 200).length, 5, 'só as primeiras 5 conexões simultâneas devem abrir');
+        assert.strictEqual(statuses[5], 429, 'a 6ª conexão simultânea do mesmo usuário deve ser rejeitada');
+    } finally {
+        for (const s of sockets) s.destroy();
+        // dá um tick pro servidor processar o 'close' e liberar os slots antes do próximo teste
+        await new Promise((r) => setTimeout(r, 50));
+    }
+});

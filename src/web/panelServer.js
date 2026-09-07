@@ -41,6 +41,8 @@ function startWebPanel(port = Number(process.env.WEB_PANEL_PORT) || 3080) {
     }
 
     const app = express();
+    app.set('query parser', 'simple'); // mitigação de CVE moderado em `qs`, ver proxyManager.js
+    app.disable('x-powered-by');
     const publicDir = path.join(__dirname, 'public');
 
     app.use(express.json({ limit: '256kb' }));

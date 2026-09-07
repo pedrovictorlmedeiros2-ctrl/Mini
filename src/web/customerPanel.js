@@ -120,6 +120,28 @@ function rateLimited(bucket, max, windowMs) {
     };
 }
 
+// Limite de conexões SSE simultâneas por usuário: o painel do cliente roda
+// no MESMO processo Node do bot Discord e de todos os outros bots hospedados
+// (não é isolado por request). Sem limite, um único usuário autenticado
+// (dono legítimo de um bot) conseguiria abrir centenas/milhares de streams
+// de console simultâneos e degradar o processo inteiro pra todo mundo —
+// um DoS de tenant único afetando os demais.
+const MAX_SSE_PER_USER = 5;
+const openSseByUser = new Map();
+
+function acquireSseSlot(userId) {
+    const current = openSseByUser.get(userId) || 0;
+    if (current >= MAX_SSE_PER_USER) return false;
+    openSseByUser.set(userId, current + 1);
+    return true;
+}
+
+function releaseSseSlot(userId) {
+    const current = openSseByUser.get(userId) || 0;
+    if (current <= 1) openSseByUser.delete(userId);
+    else openSseByUser.set(userId, current - 1);
+}
+
 // ── App ──────────────────────────────────────────────────────────────────
 
 function startCustomerPanel(port = Number(process.env.CUSTOMER_PANEL_PORT) || 3090) {
@@ -135,6 +157,7 @@ function startCustomerPanel(port = Number(process.env.CUSTOMER_PANEL_PORT) || 30
 
     const app = express();
     app.disable('x-powered-by');
+    app.set('query parser', 'simple'); // mitigação de CVE moderado em `qs`, ver proxyManager.js
     app.use(express.json({ limit: '512kb' }));
     app.use(express.static(path.join(__dirname, 'customer-public')));
 
@@ -316,6 +339,10 @@ function startCustomerPanel(port = Number(process.env.CUSTOMER_PANEL_PORT) || 30
     });
 
     app.get('/api/bots/:id/console/stream', requireSession, loadBot('view'), (req, res) => {
+        if (!acquireSseSlot(req.currentUser.id)) {
+            return res.status(429).json({ error: 'rate_limited', message: `Muitas conexões de console abertas ao mesmo tempo (máximo ${MAX_SSE_PER_USER}). Feche alguma aba e tente de novo.` });
+        }
+
         res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
@@ -336,6 +363,7 @@ function startCustomerPanel(port = Number(process.env.CUSTOMER_PANEL_PORT) || 30
         req.on('close', () => {
             clearInterval(heartbeat);
             consoleManager.consoleEvents.off(`line:${botId}`, onLine);
+            releaseSseSlot(req.currentUser.id);
         });
     });
 
