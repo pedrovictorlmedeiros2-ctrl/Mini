@@ -28,8 +28,9 @@
     "test:containerManager": "node --test tests/containerManager.test.js",
     "test:customerPanel": "node --test tests/customerPanel.test.js",
     "test:consoleManager": "node --test tests/consoleManager.test.js",
+    "test:adminPanelXss": "node --test tests/adminPanelXss.test.js",
     "build:bot-images": "sh scripts/build-bot-images.sh",
-    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/panelAuth.test.js tests/panelSession.test.js tests/fileManager.test.js tests/fileManagerStat.test.js tests/securityWrapper.test.js tests/customerPanel.test.js tests/consoleManager.test.js"
+    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/panelAuth.test.js tests/panelSession.test.js tests/fileManager.test.js tests/fileManagerStat.test.js tests/securityWrapper.test.js tests/customerPanel.test.js tests/consoleManager.test.js tests/adminPanelXss.test.js"
   },
   "keywords": [
     "discord",
