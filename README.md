@@ -23,6 +23,7 @@ próprio bot Discord.
 - Manutenção automática (logs, histórico, VACUUM).
 - Isolamento real de bots via `bwrap`/cgroup v2 (ver `SANDBOX.md`), com Docker como opção alternativa por tenant.
 - Serviço persistente via **systemd** (produção) ou PM2 (dev/fallback) — sobrevive a fechar o terminal e a reboot da VPS, com readiness gate fail-closed. Ver [`DEPLOY.md`](./DEPLOY.md).
+- **Kamikaze Mode**: resposta automática a incidentes de segurança (quarentena, restauração de backup seguro, revogação de credenciais), com um analisador auxiliar opcional via Groq que só sugere — nunca decide sozinho. Ver [`SECURITY_MONITOR.md`](./SECURITY_MONITOR.md).
 
 ---
 

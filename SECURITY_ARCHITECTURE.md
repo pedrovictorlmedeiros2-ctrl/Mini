@@ -112,3 +112,5 @@ conta própria — é a única fonte de verdade.
   como verificar se está ativo.
 - `SECURITY_LIMITATIONS.md` — o que **não** está protegido hoje, sem
   meias-palavras.
+- `SECURITY_MONITOR.md` — SecurityMonitor + Groq (Kamikaze Fase 2): analisador
+  auxiliar, nunca decide nada sozinho, relatório de validação.
