@@ -412,6 +412,31 @@ function initDatabase() {
         )
     `);
 
+    // FASE 7 (ProvisioningManager): histórico/log de tentativas de
+    // provisionamento — NÃO é o mecanismo de exclusão mútua (isso é o CAS
+    // de OrderManager.transitionOrder(), ver ProvisioningManager.js); cada
+    // tentativa (inclusive retries) grava sua própria linha, nunca
+    // sobrescreve uma anterior. `error_message` é sempre sanitizado antes
+    // de gravar (nunca stack trace bruta, nunca segredo). `executor_user_id`
+    // é NULL pra provisionamento automático pós-aprovação, preenchido pra
+    // retry manual (staff/admin).
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS commerce_provisioning_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            entitlement_id INTEGER,
+            idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running',
+            error_message TEXT,
+            executor_user_id TEXT,
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME,
+            FOREIGN KEY (order_id) REFERENCES commerce_orders(id),
+            FOREIGN KEY (entitlement_id) REFERENCES commerce_entitlements(id),
+            FOREIGN KEY (executor_user_id) REFERENCES users(id)
+        )
+    `);
+
     // Permissão comercial independente de 'admin' (ROLE_HIERARCHY de
     // userManager.js não é alterada) — soft-revoke (revoked_at) preserva
     // histórico de quem teve o papel e quando, nunca DELETE.
@@ -508,6 +533,7 @@ function initDatabase() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_entitlements_user_status ON commerce_entitlements(user_id, status)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_proofs_order ON commerce_proofs(order_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_products_status ON commerce_products(status)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_provisioning_attempts_order ON commerce_provisioning_attempts(order_id)`);
 
     // CORREÇÃO (defesa em profundidade — race condition de porta): garante no
     // nível do banco que duas linhas nunca tenham a mesma porta não-nula, mesmo

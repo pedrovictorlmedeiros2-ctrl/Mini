@@ -30,13 +30,15 @@ const ProductCatalog = require('../../managers/commerce/ProductCatalog');
 const OrderManager = require('../../managers/commerce/OrderManager');
 const PaymentManager = require('../../managers/commerce/PaymentManager');
 const ProofManager = require('../../managers/commerce/ProofManager');
+const ProvisioningManager = require('../../managers/commerce/ProvisioningManager');
 const CommerceStaffManager = require('../../managers/commerce/CommerceStaffManager');
 const CommerceConfig = require('../../managers/commerce/CommerceConfig');
+const queueManager = require('../../managers/queueManager');
 
 const EXACT = [
     'commerce_view_plans', 'commerce_view_plan_details', 'commerce_buy_plan', 'commerce_support', 'commerce_pay',
     'commerce_send_proof', 'commerce_cancel_order', 'commerce_select_product',
-    'commerce_staff_queue', 'commerce_staff_select_order',
+    'commerce_staff_queue', 'commerce_staff_select_order', 'commerce_staff_provisioning_failures',
     'commerce_admin_products', 'commerce_admin_create_product', 'modal_commerce_admin_create_product',
     'commerce_admin_select_product', 'commerce_admin_config_pix', 'modal_commerce_admin_config_pix',
     'commerce_admin_stats', 'commerce_admin_audit',
@@ -44,6 +46,7 @@ const EXACT = [
 const PREFIXES = [
     'commerce_staff_view_proof_', 'commerce_staff_approve_', 'commerce_staff_reject_', 'modal_commerce_staff_reject_',
     'commerce_staff_request_new_proof_', 'modal_commerce_staff_request_new_proof_',
+    'commerce_staff_retry_provisioning_',
     'commerce_admin_publish_product_', 'commerce_admin_pause_product_', 'commerce_admin_archive_product_',
 ];
 
@@ -121,6 +124,7 @@ async function publishStaffPanel(interaction) {
         .setDescription('Gerencie produtos, revise pedidos e acompanhe as vendas.');
     const row1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('commerce_staff_queue').setLabel('Pedidos em Análise').setEmoji('📋').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('commerce_staff_provisioning_failures').setLabel('Falhas de Provisionamento').setEmoji('🚨').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('commerce_admin_products').setLabel('Produtos').setEmoji('📦').setStyle(ButtonStyle.Secondary)
     );
     const row2 = new ActionRowBuilder().addComponents(
@@ -536,6 +540,38 @@ async function handle(interaction, helpers = {}) {
             await channel.send('✅ **Pagamento Aprovado!** Este canal será fechado em 10 segundos.');
             setTimeout(() => channel.delete().catch(() => {}), 10000);
         }
+
+        // FASE 7: provisionamento automático pós-aprovação, enfileirado —
+        // nunca depende da permissão Discord do cliente (o gatilho já foi
+        // a aprovação do staff, checada acima por confirmPayment()). Nunca
+        // bloqueia a resposta desta interação — o resultado (sucesso ou
+        // falha) é tratado de forma assíncrona e notificado separadamente.
+        // ProvisioningManager nunca é chamado com um executorUserId aqui —
+        // isto É a chamada automática, não um retry manual.
+        queueManager.addToQueue(
+            () => ProvisioningManager.provision(order.id),
+            `Provisionar pedido #${order.id}`
+        ).then((provResult) => {
+            if (provResult.alreadyActive) return;
+            notifyBuyer(
+                interaction.client, order.user_id,
+                `🎉 **Seu plano foi ativado!** Pedido #${order.id} está pronto — obrigado pela compra.`
+            );
+        }).catch(async (err) => {
+            const cfg2 = CommerceConfig.getConfig();
+            await postToChannel(interaction.guild, cfg2?.sales_log_channel_id, {
+                content: `🚨 **Falha no provisionamento automático** do pedido #${order.id}: ${err.message}\nRequer retry manual — veja "Falhas de Provisionamento" no painel comercial.`,
+            });
+            await notifyBuyer(
+                interaction.client, order.user_id,
+                `⚠️ **Houve um problema técnico ao ativar seu plano** (Pedido #${order.id}).\n\n` +
+                `✅ Seu pagamento continua confirmado.\n` +
+                `👥 Nossa equipe de suporte já foi notificada automaticamente.\n` +
+                `❌ Você **não precisa pagar novamente**.\n` +
+                `⏳ Nenhuma ação é necessária da sua parte agora — vamos resolver e avisar assim que seu plano estiver ativo.`
+            );
+        });
+
         return interaction.editReply({ content: `✅ Pedido #${order.id} aprovado com sucesso!${result.couponWarning ? ' ⚠️ cupom acima do limite — verifique.' : ''}` });
     }
 
@@ -631,6 +667,60 @@ async function handle(interaction, helpers = {}) {
         await notifyBuyer(interaction.client, order.user_id, `🔁 **Precisamos de um novo comprovante** pro seu pedido #${order.id}.\n**Motivo:** ${reason}\nAcesse o canal do seu pedido pra enviar.`);
 
         return interaction.reply({ content: `🔁 Pedido #${order.id}: novo comprovante solicitado ao cliente.`, ephemeral: true });
+    }
+
+    // FASE 7: listagem dedicada de pedidos com pagamento confirmado mas
+    // provisionamento não concluído — Payment continua 'confirmed' nesses
+    // casos (nunca cancelado automaticamente), só falta o retry.
+    if (customId === 'commerce_staff_provisioning_failures') {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const failed = query(
+            `SELECT o.*, u.username FROM commerce_orders o JOIN users u ON o.user_id = u.id
+             WHERE o.status = 'PROVISIONING_FAILED' ORDER BY o.updated_at ASC`
+        );
+        if (failed.length === 0) {
+            return interaction.reply({ content: '✅ Nenhuma falha de provisionamento pendente no momento.', ephemeral: true });
+        }
+        const embed = new EmbedBuilder()
+            .setColor('#FF5555')
+            .setTitle('🚨 Falhas de Provisionamento')
+            .setDescription(failed.map((o) => `🔹 **#${o.id}** — \`${o.username}\` — \`${formatMoney(o.total_price)}\``).join('\n'));
+        const buttons = failed.slice(0, 5).map((o) =>
+            new ButtonBuilder().setCustomId(`commerce_staff_retry_provisioning_${o.id}`).setLabel(`Retry #${o.id}`).setEmoji('🔄').setStyle(ButtonStyle.Primary)
+        );
+        // Discord permite no máximo 5 botões por linha — pedidos além
+        // disso continuam visíveis na lista, só sem botão de retry direto
+        // nesta resposta (o comando pode ser reaberto depois que os
+        // primeiros forem resolvidos).
+        const row = new ActionRowBuilder().addComponents(buttons);
+        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    }
+
+    if (customId.startsWith('commerce_staff_retry_provisioning_')) {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const orderId = Number(customId.replace('commerce_staff_retry_provisioning_', ''));
+        await interaction.deferReply({ ephemeral: true });
+
+        try {
+            const result = ProvisioningManager.provision(orderId, { executorUserId: interaction.user.id });
+            if (!result.alreadyActive) {
+                await notifyBuyer(
+                    interaction.client, result.order.user_id,
+                    `🎉 **Seu plano foi ativado!** Pedido #${result.order.id} está pronto — obrigado pela paciência.`
+                );
+            }
+            const cfg = CommerceConfig.getConfig();
+            await postToChannel(interaction.guild, cfg?.sales_log_channel_id, {
+                content: `✅ Retry de provisionamento do pedido #${orderId} concluído com sucesso por <@${interaction.user.id}>.`,
+            });
+            return interaction.editReply({ content: `✅ Pedido #${orderId} provisionado com sucesso.` });
+        } catch (err) {
+            return interaction.editReply({ content: `⚠️ Retry falhou: ${err.message}` });
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════

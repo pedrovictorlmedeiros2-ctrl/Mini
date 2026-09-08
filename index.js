@@ -101,6 +101,7 @@ const { startFailoverScheduler, stopFailoverScheduler } = require('./src/manager
 const { reconcileStuckIncidents } = require('./src/managers/security/IncidentResponseManager');
 const { computeReadiness, startReadinessMonitor, getReadinessState, STATUS: READINESS_STATUS } = require('./src/managers/serviceReadiness');
 const { startSecurityMonitor } = require('./src/managers/security/monitor/SecurityMonitor');
+const { reconcileStuckProvisioning } = require('./src/managers/commerce/CommerceScheduler');
 
 // ── INICIALIZAÇÃO DO BANCO DE DADOS, CONSOLE E MONITORAMENTO ──────────────────
 initDatabase();
@@ -117,6 +118,21 @@ syncStatusOnStartup();
 reconcileStuckIncidents().catch((err) => {
     console.error('[Kamikaze] Falha na reconciliação de incidentes presos:', err.message);
 });
+
+// FASE 7 (ProvisioningManager): mesmo princípio, aplicado a pedidos
+// comerciais presos em PROVISIONING de uma execução anterior (o CAS de
+// exclusividade do ProvisioningManager é persistente no banco, mas
+// nenhum processo consegue saber se um PROVISIONING que encontra ao
+// subir é genuinamente uma tentativa em andamento — nunca é, no boot,
+// já que o processo que a criou acabou de morrer). Roda SÓ aqui, uma
+// vez — nunca periodicamente (ver CommerceScheduler.js: rodar isso
+// enquanto o ProvisioningManager está de fato provisionando algo
+// derrubaria uma tentativa legítima no meio do caminho).
+try {
+    reconcileStuckProvisioning();
+} catch (err) {
+    console.error('[CommerceScheduler] Falha na reconciliação de provisionamentos presos:', err.message);
+}
 
 // ── READINESS GATE ────────────────────────────────────────────────────────
 // Assíncrono e não-bloqueante (mesmo padrão do reconcileStuckIncidents()
