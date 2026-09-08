@@ -106,6 +106,15 @@ module.exports = {
         // puro) — nunca a mesma pasta.
         proofsFolder: process.env.COMMERCE_PROOFS_FOLDER || './commerce-proofs',
         maxProofSizeBytes: parseInt(process.env.COMMERCE_MAX_PROOF_SIZE_BYTES) || 8 * 1024 * 1024, // 8MB
+        // Retenção (Fase 5): só comprovantes já REVISADOS (aceito/recusado)
+        // e mais velhos que isso têm o ARQUIVO em disco apagado — a linha
+        // no banco nunca é apagada (mantém o histórico de auditoria). Um
+        // comprovante ainda 'submitted' (aguardando revisão) nunca é
+        // purgado, não importa a idade — decisão de negócio explícita
+        // (arquitetura §"retenção configurável, não assume obrigação legal
+        // indefinida"), valor default conservador até haver definição
+        // jurídica/operacional formal.
+        proofRetentionDays: parseInt(process.env.COMMERCE_PROOF_RETENTION_DAYS) || 180,
     },
 
     // ─── RECURSOS DO SISTEMA ───

@@ -64,12 +64,62 @@ function detectFileType(buffer) {
     return ALLOWED_FILE_TYPES.find((type) => type.sniff(buffer)) || null;
 }
 
+// SSRF (Fase 5 — achado da revisão adversarial final): `attachment.url`
+// é tratado como adversarial igual a qualquer outro campo do anexo. Sem
+// esta allowlist, nada impediria — por bug futuro, ou uma chamada deste
+// manager fora do fluxo normal do Discord.js — que `submitProof()`
+// fizesse o SERVIDOR baixar uma URL arbitrária (rede interna, metadata
+// de nuvem, um host que devolve um arquivo gigante pra esgotar memória).
+// Anexos reais do Discord SEMPRE vêm de um desses dois hosts de CDN —
+// qualquer coisa fora disso é recusada antes mesmo de tentar o fetch.
+const ALLOWED_ATTACHMENT_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
+
+function isAllowedAttachmentUrl(rawUrl) {
+    try {
+        const parsed = new URL(rawUrl);
+        return parsed.protocol === 'https:' && ALLOWED_ATTACHMENT_HOSTS.has(parsed.hostname);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Sanitiza o nome de exibição de um comprovante (Fase 5). NUNCA é usado
+ * pra montar um caminho de arquivo real (o nome interno em disco é
+ * sempre `${crypto.randomUUID()}.enc` — ver `submitProof`), mas ainda
+ * assim precisa ser seguro porque é reexibido pra staff (nome do anexo
+ * em `getDecryptedProof`/`AttachmentBuilder`) e persistido no banco:
+ * - `path.basename` descarta qualquer componente de diretório (cobre
+ *   "../../etc/passwd", "/etc/passwd", "C:\\Windows\\x" etc. — em
+ *   qualquer um desses casos, o pior resultado possível já é só o nome
+ *   final, nunca um caminho).
+ * - Normaliza Unicode (NFC) e remove caracteres de controle (0x00-0x1F,
+ *   0x7F) — nomes forjados com caracteres invisíveis/de controle nunca
+ *   chegam a ser exibidos ou guardados como vieram.
+ * - Trunca pra um tamanho razoável — nomes gigantes nunca inflam o banco
+ *   nem a resposta ao staff.
+ */
+function sanitizeFilename(rawName) {
+    const base = path.basename(String(rawName || ''));
+    const normalized = base.normalize('NFC').replace(/[\x00-\x1f\x7f]/g, '').trim();
+    const safe = normalized.slice(0, 150);
+    return safe || 'comprovante';
+}
+
 function getProof(proofId) {
     return get('SELECT * FROM commerce_proofs WHERE id = ?', [proofId]);
 }
 
 function listProofsForOrder(orderId) {
-    return query('SELECT * FROM commerce_proofs WHERE order_id = ? ORDER BY created_at ASC', [orderId]);
+    // Ordena por rowid, não só por created_at: `created_at` tem
+    // granularidade de segundo (datetime('now') do SQLite) — duas
+    // submissões concorrentes pro mesmo pedido podem cair no MESMO
+    // segundo, e sem um desempate determinístico, qual delas conta como
+    // "a mais recente" (getLatestProofForOrder) ficaria indefinido. O
+    // rowid implícito do SQLite (a tabela não é WITHOUT ROWID) sempre
+    // reflete a ordem real de inserção, então o desempate é exato mesmo
+    // sob concorrência real.
+    return query('SELECT *, rowid FROM commerce_proofs WHERE order_id = ? ORDER BY created_at ASC, rowid ASC', [orderId]);
 }
 
 function getLatestProofForOrder(orderId) {
@@ -111,20 +161,53 @@ async function submitProof(orderId, uploaderUserId, attachment) {
     if (!attachment || typeof attachment.url !== 'string' || !attachment.url) {
         throw new Error('Anexo inválido.');
     }
+    if (!isAllowedAttachmentUrl(attachment.url)) {
+        recordAuditEvent({
+            userId: uploaderUserId,
+            event: 'commerce:proof_rejected_invalid_url',
+            details: JSON.stringify({ orderId }),
+            severity: 'warning',
+        });
+        throw new Error('URL do anexo inválida — só anexos do CDN oficial do Discord são aceitos.');
+    }
 
     const declaredSize = Number(attachment.size) || 0;
     if (declaredSize > 0 && declaredSize > config.commerce.maxProofSizeBytes) {
         throw new Error(`Arquivo muito grande (máx. ${Math.round(config.commerce.maxProofSizeBytes / (1024 * 1024))}MB).`);
     }
 
+    // A extensão declarada é extraída do nome BRUTO (path.extname não
+    // muda com sanitização — só remove diretório, que não afeta a
+    // extensão) porque é comparada contra o conteúdo real abaixo; o nome
+    // gravado/exibido depois (original_filename) usa a versão
+    // SANITIZADA, nunca o valor bruto.
     const declaredExt = path.extname(String(attachment.name || '')).toLowerCase();
     const declaredMime = String(attachment.contentType || '').split(';')[0].trim().toLowerCase();
+    const safeOriginalFilename = sanitizeFilename(attachment.name);
 
     // Baixa o conteúdo AGORA — nunca guarda só a URL temporária do
-    // Discord (expira em ~24h) como referência persistente.
-    const response = await fetch(attachment.url);
+    // Discord (expira em ~24h) como referência persistente. Qualquer
+    // falha de rede/URL expirada é convertida numa mensagem clara — nunca
+    // deixa um erro bruto de fetch() vazar, e nada é escrito em disco até
+    // aqui (nenhum arquivo parcial/corrompido pode sobrar de um download
+    // que falhou).
+    let response;
+    try {
+        response = await fetch(attachment.url);
+    } catch {
+        throw new Error('Falha ao baixar o anexo do Discord (a URL pode ter expirado ou a rede falhou). Tente enviar o comprovante de novo.');
+    }
     if (!response.ok) {
-        throw new Error('Falha ao baixar o anexo do Discord.');
+        throw new Error('Falha ao baixar o anexo do Discord (a URL pode ter expirado). Tente enviar o comprovante de novo.');
+    }
+    // Checagem antecipada pelo header Content-Length, quando presente —
+    // evita puxar um corpo gigante inteiro pra memória só pra descobrir
+    // depois que ele excede o limite. Não substitui a checagem em
+    // `buffer.length` abaixo (o header pode faltar ou estar errado) — é
+    // só uma saída mais barata no caso comum.
+    const contentLength = Number(response.headers?.get?.('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > config.commerce.maxProofSizeBytes) {
+        throw new Error(`Arquivo muito grande (máx. ${Math.round(config.commerce.maxProofSizeBytes / (1024 * 1024))}MB).`);
     }
     const buffer = Buffer.from(await response.arrayBuffer());
 
@@ -152,22 +235,55 @@ async function submitProof(orderId, uploaderUserId, attachment) {
         throw new Error('O tipo declarado do arquivo não corresponde ao conteúdo real dele.');
     }
 
+    // RE-VALIDAÇÃO PERSISTENTE (Fase 5 — garantia contra corrida real,
+    // não só a otimização de UI): entre o início desta função e este
+    // ponto houve pelo menos um `await` real (o download do anexo, que
+    // pode levar segundos) — nesse intervalo o pedido pode ter mudado de
+    // estado por outro caminho (staff abriu revisão concorrentemente,
+    // cliente cancelou, o CommerceScheduler expirou o carrinho). Reconfere
+    // contra o banco AGORA, de forma síncrona e imediatamente antes da
+    // escrita — nenhum `await` entre esta leitura e o INSERT abaixo, então
+    // não existe nova janela de corrida aqui (Node é single-threaded e o
+    // driver SQLite é síncrono). O lock em memória da camada de UI
+    // (commerce.js) é só uma otimização pra UX — esta é a garantia real.
+    const freshOrder = OrderManager.getOrder(orderId);
+    if (!freshOrder || ![OrderManager.STATUS.AWAITING_PAYMENT, OrderManager.STATUS.PROOF_SUBMITTED].includes(freshOrder.status)) {
+        recordAuditEvent({
+            userId: uploaderUserId,
+            event: 'commerce:proof_rejected_stale_state',
+            details: JSON.stringify({ orderId, statusAtReceive: freshOrder ? freshOrder.status : null }),
+            severity: 'warning',
+        });
+        throw new Error(`Pedido #${orderId} não está mais aceitando comprovante (o estado mudou durante o envio: ${freshOrder ? freshOrder.status : 'removido'}).`);
+    }
+
     const proofId = crypto.randomUUID();
     const sha256 = fileCrypto.sha256(buffer);
     const encrypted = fileCrypto.encryptBuffer(buffer);
 
+    // Diretório privado, fora de qualquer pasta servida publicamente —
+    // nenhuma rota HTTP nesta fase serve `config.commerce.proofsFolder`.
+    // Permissões restritivas (0700/0600): mesmo num ambiente
+    // multiusuário, só o processo dono consegue ler o diretório/arquivo.
+    // Nome do arquivo SEMPRE `${uuid}.enc` — nunca derivado do nome
+    // enviado pelo cliente (isso por si só já neutraliza qualquer
+    // tentativa de path traversal via nome de arquivo). Flag 'wx' faz a
+    // escrita FALHAR se o caminho já existir, em vez de sobrescrever —
+    // defesa em profundidade contra uma colisão de UUID (praticamente
+    // impossível) ou qualquer bug futuro que gere o mesmo id duas vezes.
     const storageDir = path.resolve(config.commerce.proofsFolder);
-    fs.mkdirSync(storageDir, { recursive: true });
+    fs.mkdirSync(storageDir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(storageDir, 0o700); } catch { /* melhor esforço — não bloqueia em ambientes restritos */ }
     const storagePath = path.join(storageDir, `${proofId}.enc`);
-    fs.writeFileSync(storagePath, encrypted);
+    fs.writeFileSync(storagePath, encrypted, { mode: 0o600, flag: 'wx' });
 
     run(
         `INSERT INTO commerce_proofs (id, order_id, storage_path, sha256, mime_type, original_filename, size_bytes, uploaded_by_user_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [proofId, orderId, storagePath, sha256, detected.mime, String(attachment.name || '').slice(0, 200), buffer.length, uploaderUserId]
+        [proofId, orderId, storagePath, sha256, detected.mime, safeOriginalFilename, buffer.length, uploaderUserId]
     );
 
-    if (order.status === OrderManager.STATUS.AWAITING_PAYMENT) {
+    if (freshOrder.status === OrderManager.STATUS.AWAITING_PAYMENT) {
         OrderManager.transitionOrder(orderId, [OrderManager.STATUS.AWAITING_PAYMENT], OrderManager.STATUS.PROOF_SUBMITTED);
     }
 
@@ -191,10 +307,22 @@ async function submitProof(orderId, uploaderUserId, attachment) {
  */
 function getDecryptedProof(proofId, requestingUserId) {
     if (!CommerceStaffManager.hasCommercePermission(requestingUserId)) {
+        // Auditoria da tentativa NEGADA (Fase 5) — cobre tanto um cliente
+        // comum quanto um staff já revogado tentando acessar; nunca grava
+        // o conteúdo do comprovante, só o fato da tentativa e quem tentou.
+        recordAuditEvent({
+            userId: requestingUserId,
+            event: 'commerce:proof_access_denied',
+            details: JSON.stringify({ proofId }),
+            severity: 'warning',
+        });
         throw new Error('Sem permissão comercial (admin ou COMMERCE_STAFF) para visualizar comprovantes.');
     }
     const proof = getProof(proofId);
     if (!proof) throw new Error(`Comprovante não encontrado: ${proofId}`);
+    if (proof.purged_at) {
+        throw new Error('Este comprovante já foi removido por retenção — não está mais disponível para visualização (o pedido continua auditável).');
+    }
 
     const encrypted = fs.readFileSync(proof.storage_path);
     const buffer = fileCrypto.decryptBuffer(encrypted);
@@ -224,13 +352,61 @@ function markLatestProofStatus(orderId, status, reviewerUserId, reason = null) {
     return getProof(latest.id);
 }
 
+/**
+ * Retenção (Fase 5) — apaga só o ARQUIVO cifrado em disco de
+ * comprovantes já REVISADOS ('accepted'/'rejected') mais velhos que
+ * `config.commerce.proofRetentionDays`. Um comprovante 'submitted'
+ * (aguardando revisão) NUNCA é purgado, não importa a idade — apagar a
+ * única evidência de um pedido ainda pendente seria destruir algo que
+ * pode ser necessário pra decidir o próprio pedido. A LINHA no banco
+ * nunca é apagada (mantém o histórico de auditoria de que aquele
+ * comprovante existiu, foi recebido e revisado); só `storage_path` some
+ * e `purged_at` é gravado, o que já faz `getDecryptedProof` recusar
+ * qualquer tentativa de leitura depois.
+ */
+function purgeExpiredProofs() {
+    const days = config.commerce.proofRetentionDays;
+    const candidates = query(
+        `SELECT * FROM commerce_proofs WHERE purged_at IS NULL AND status IN ('accepted','rejected') AND created_at <= datetime('now', ?)`,
+        [`-${days} days`]
+    );
+
+    let purgedCount = 0;
+    for (const proof of candidates) {
+        try {
+            if (fs.existsSync(proof.storage_path)) {
+                fs.unlinkSync(proof.storage_path);
+            }
+            run("UPDATE commerce_proofs SET purged_at = datetime('now') WHERE id = ?", [proof.id]);
+            purgedCount += 1;
+        } catch (err) {
+            // Não interrompe a varredura por causa de um arquivo — loga e
+            // tenta de novo na próxima execução (nunca marca purged_at se
+            // o arquivo não foi de fato removido).
+            console.error(`[ProofManager] Falha ao purgar comprovante ${proof.id} pela retenção:`, err.message);
+        }
+    }
+
+    if (purgedCount) {
+        recordAuditEvent({
+            userId: null,
+            event: 'commerce:proof_purged',
+            details: JSON.stringify({ count: purgedCount, retentionDays: days }),
+            severity: 'info',
+        });
+    }
+    return purgedCount;
+}
+
 module.exports = {
     ALLOWED_FILE_TYPES,
     detectFileType,
+    sanitizeFilename,
     getProof,
     listProofsForOrder,
     getLatestProofForOrder,
     submitProof,
     getDecryptedProof,
     markLatestProofStatus,
+    purgeExpiredProofs,
 };

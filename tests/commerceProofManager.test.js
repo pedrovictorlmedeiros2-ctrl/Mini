@@ -78,7 +78,7 @@ test('IDOR: submitProof recusa um comprovante enviado por quem NÃO é dono do p
     mockFetch(PNG_BUFFER);
 
     await assert.rejects(
-        () => ProofManager.submitProof(order.id, attacker, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length }),
+        () => ProofManager.submitProof(order.id, attacker, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length }),
         /não é o dono deste pedido/
     );
     assert.equal(OrderManager.getOrder(order.id).status, OrderManager.STATUS.AWAITING_PAYMENT, 'o pedido nunca deveria ter avançado de estado');
@@ -90,7 +90,7 @@ test('IDOR: tentativa negada é auditada com o ID de quem tentou e o dono real',
     const attacker = makeUser();
     const order = makeOrderAwaitingPayment(owner);
 
-    await assert.rejects(() => ProofManager.submitProof(order.id, attacker, { url: 'x', name: 'a.png', size: 10 }));
+    await assert.rejects(() => ProofManager.submitProof(order.id, attacker, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', size: 10 }));
 
     // Compara o orderId como CAMPO JSON parseado, nunca como substring
     // crua — dois pedidos com IDs numéricos "5" e "15" fariam uma busca
@@ -107,7 +107,7 @@ test('TIPO REAL POR CONTEÚDO: um "comprovante.jpg" cujo conteúdo é na verdade
     mockFetch(EXE_BUFFER);
 
     await assert.rejects(
-        () => ProofManager.submitProof(order.id, userId, { url: 'x', name: 'comprovante.jpg', contentType: 'image/jpeg', size: EXE_BUFFER.length }),
+        () => ProofManager.submitProof(order.id, userId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'comprovante.jpg', contentType: 'image/jpeg', size: EXE_BUFFER.length }),
         /Tipo de arquivo não permitido/
     );
     assert.equal(query('SELECT * FROM commerce_proofs WHERE order_id = ?', [order.id]).length, 0);
@@ -119,7 +119,7 @@ test('TIPO REAL POR CONTEÚDO: extensão .png com conteúdo JPEG real é recusad
     mockFetch(JPEG_BUFFER);
 
     await assert.rejects(
-        () => ProofManager.submitProof(order.id, userId, { url: 'x', name: 'comprovante.png', contentType: 'image/jpeg', size: JPEG_BUFFER.length }),
+        () => ProofManager.submitProof(order.id, userId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'comprovante.png', contentType: 'image/jpeg', size: JPEG_BUFFER.length }),
         /extensão do arquivo não corresponde/
     );
 });
@@ -130,7 +130,7 @@ test('TIPO REAL POR CONTEÚDO: MIME declarado divergente do conteúdo real é re
     mockFetch(PDF_BUFFER);
 
     await assert.rejects(
-        () => ProofManager.submitProof(order.id, userId, { url: 'x', name: 'comprovante.pdf', contentType: 'image/png', size: PDF_BUFFER.length }),
+        () => ProofManager.submitProof(order.id, userId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'comprovante.pdf', contentType: 'image/png', size: PDF_BUFFER.length }),
         /tipo declarado do arquivo não corresponde/
     );
 });
@@ -140,7 +140,7 @@ test('PDF válido também é aceito (allowlist não é só imagem)', async () =>
     const order = makeOrderAwaitingPayment(userId);
     mockFetch(PDF_BUFFER);
 
-    const proof = await ProofManager.submitProof(order.id, userId, { url: 'x', name: 'comprovante.pdf', contentType: 'application/pdf', size: PDF_BUFFER.length });
+    const proof = await ProofManager.submitProof(order.id, userId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'comprovante.pdf', contentType: 'application/pdf', size: PDF_BUFFER.length });
     assert.equal(proof.mime_type, 'application/pdf');
 });
 
@@ -150,7 +150,7 @@ test('TAMANHO: arquivo maior que o limite configurado é recusado (checado antes
     const hugeSize = config.commerce.maxProofSizeBytes + 1;
 
     await assert.rejects(
-        () => ProofManager.submitProof(order.id, userId, { url: 'x', name: 'a.png', contentType: 'image/png', size: hugeSize }),
+        () => ProofManager.submitProof(order.id, userId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: hugeSize }),
         /muito grande/
     );
 });
@@ -162,7 +162,7 @@ test('TAMANHO: tamanho declarado mentiroso (pequeno) não escapa da checagem —
     mockFetch(bigBuffer);
 
     await assert.rejects(
-        () => ProofManager.submitProof(order.id, userId, { url: 'x', name: 'a.png', contentType: 'image/png', size: 10 }), // mente que é pequeno
+        () => ProofManager.submitProof(order.id, userId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: 10 }), // mente que é pequeno
         /muito grande/
     );
 });
@@ -174,7 +174,7 @@ test('submitProof: só aceito em AWAITING_PAYMENT ou PROOF_SUBMITTED — nunca e
     mockFetch(PNG_BUFFER);
 
     await assert.rejects(
-        () => ProofManager.submitProof(draftOrder.id, userId, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length }),
+        () => ProofManager.submitProof(draftOrder.id, userId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length }),
         /não está aceitando comprovante/
     );
 });
@@ -183,10 +183,10 @@ test('HISTÓRICO: reenviar um comprovante nunca sobrescreve o anterior — cria 
     const userId = makeUser();
     const order = makeOrderAwaitingPayment(userId);
     mockFetch(PNG_BUFFER);
-    const first = await ProofManager.submitProof(order.id, userId, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    const first = await ProofManager.submitProof(order.id, userId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     mockFetch(JPEG_BUFFER);
-    const second = await ProofManager.submitProof(order.id, userId, { url: 'y', name: 'b.jpg', contentType: 'image/jpeg', size: JPEG_BUFFER.length });
+    const second = await ProofManager.submitProof(order.id, userId, { url: 'https://cdn.discordapp.com/attachments/2/2/file2.dat', name: 'b.jpg', contentType: 'image/jpeg', size: JPEG_BUFFER.length });
 
     assert.notEqual(first.id, second.id);
     const all = ProofManager.listProofsForOrder(order.id);
@@ -200,7 +200,7 @@ test('getDecryptedProof: só staff comercial (admin ou COMMERCE_STAFF) — nunca
     const otherClient = makeUser();
     const order = makeOrderAwaitingPayment(owner);
     mockFetch(PNG_BUFFER);
-    const proof = await ProofManager.submitProof(order.id, owner, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    const proof = await ProofManager.submitProof(order.id, owner, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     assert.throws(() => ProofManager.getDecryptedProof(proof.id, owner), /Sem permissão comercial/, 'nem o próprio dono do pedido pode decriptar sem ser staff');
     assert.throws(() => ProofManager.getDecryptedProof(proof.id, otherClient), /Sem permissão comercial/);
@@ -216,7 +216,7 @@ test('getDecryptedProof: COMMERCE_STAFF (sem ser admin) também pode visualizar'
     const owner = makeUser();
     const order = makeOrderAwaitingPayment(owner);
     mockFetch(PNG_BUFFER);
-    const proof = await ProofManager.submitProof(order.id, owner, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    const proof = await ProofManager.submitProof(order.id, owner, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     assert.doesNotThrow(() => ProofManager.getDecryptedProof(proof.id, staff));
 });
@@ -226,7 +226,7 @@ test('AUDITORIA: recebimento e visualização são ambos auditados', async () =>
     const owner = makeUser();
     const order = makeOrderAwaitingPayment(owner);
     mockFetch(PNG_BUFFER);
-    const proof = await ProofManager.submitProof(order.id, owner, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    const proof = await ProofManager.submitProof(order.id, owner, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     const received = query("SELECT * FROM audit_log WHERE action = 'commerce:proof_received' AND details LIKE ?", [`%${proof.id}%`]);
     assert.equal(received.length, 1);
@@ -243,7 +243,7 @@ test('ISOLAMENTO: comprovante do pedido do cliente A nunca aparece na listagem d
     const orderA = makeOrderAwaitingPayment(clientA);
     const orderB = makeOrderAwaitingPayment(clientB);
     mockFetch(PNG_BUFFER);
-    await ProofManager.submitProof(orderA.id, clientA, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    await ProofManager.submitProof(orderA.id, clientA, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     assert.equal(ProofManager.listProofsForOrder(orderB.id).length, 0);
     assert.equal(ProofManager.getLatestProofForOrder(orderB.id), null);
@@ -254,7 +254,7 @@ test('INTEGRIDADE: arquivo adulterado em disco faz getDecryptedProof falhar expl
     const owner = makeUser();
     const order = makeOrderAwaitingPayment(owner);
     mockFetch(PNG_BUFFER);
-    const proof = await ProofManager.submitProof(order.id, owner, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    const proof = await ProofManager.submitProof(order.id, owner, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     // Corrompe o arquivo cifrado em disco.
     const corrupted = fs.readFileSync(proof.storage_path);

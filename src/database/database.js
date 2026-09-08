@@ -457,6 +457,12 @@ function initDatabase() {
         )
     `);
 
+    // FASE 5 COMERCIAL (retenção de comprovantes): marca quando o arquivo
+    // em disco de um comprovante foi apagado por retenção — a LINHA nunca
+    // é apagada (mantém o histórico/auditoria de que aquele comprovante
+    // existiu e foi revisado), só o arquivo cifrado em disco.
+    try { db.exec(`ALTER TABLE commerce_proofs ADD COLUMN purged_at DATETIME`); } catch { /* já existe */ }
+
     // Estrutura de canais/categorias da loja comercial (Fase 3) — separada
     // de `sales_config` (legado: category_id/admin_role_id são de UM
     // canal de carrinho por vez). Uma linha só (id=1), preenchida pelo

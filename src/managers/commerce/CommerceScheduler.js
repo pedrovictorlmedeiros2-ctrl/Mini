@@ -26,6 +26,7 @@ const { recordAuditEvent } = require('../auditManager');
 const config = require('../../../config');
 const OrderManager = require('./OrderManager');
 const EntitlementManager = require('./EntitlementManager');
+const ProofManager = require('./ProofManager');
 
 let sweepTimer = null;
 
@@ -101,9 +102,21 @@ function reconcileStuckProvisioning() {
     return count;
 }
 
+/**
+ * Retenção de comprovantes (Fase 5) — wrapper fino sobre
+ * `ProofManager.purgeExpiredProofs()`, chamado periodicamente como as
+ * outras varreduras. A lógica de segurança (nunca purgar um comprovante
+ * ainda pendente de revisão, nunca apagar a linha do banco) vive inteira
+ * dentro do ProofManager — este módulo só decide QUANDO rodar.
+ */
+function sweepExpiredProofs() {
+    return ProofManager.purgeExpiredProofs();
+}
+
 function runAllSweeps() {
     sweepExpiredCarts();
     sweepExpiredEntitlements();
+    sweepExpiredProofs();
 }
 
 function startCommerceScheduler(intervalMs = 15 * 60 * 1000) {
@@ -128,6 +141,7 @@ function stopCommerceScheduler() {
 module.exports = {
     sweepExpiredCarts,
     sweepExpiredEntitlements,
+    sweepExpiredProofs,
     reconcileStuckProvisioning,
     runAllSweeps,
     startCommerceScheduler,

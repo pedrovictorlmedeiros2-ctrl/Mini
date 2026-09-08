@@ -71,7 +71,7 @@ async function runFullPurchaseToApproval(clientUserId, adminUserId, productOverr
     PaymentManager.createPaymentRecord(order.id);
 
     mockFetch(PNG_BUFFER);
-    await ProofManager.submitProof(order.id, clientUserId, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    await ProofManager.submitProof(order.id, clientUserId, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     PaymentManager.openForReview(order.id, adminUserId);
     const { order: approved } = PaymentManager.confirmPayment(order.id, adminUserId);
@@ -150,7 +150,7 @@ test('confirmPayment marca o último comprovante como "accepted" e registra quem
     OrderManager.confirmProduct(order.id, product.id);
     PaymentManager.createPaymentRecord(order.id);
     mockFetch(PNG_BUFFER);
-    const proof = await ProofManager.submitProof(order.id, client, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    const proof = await ProofManager.submitProof(order.id, client, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     PaymentManager.openForReview(order.id, admin);
     PaymentManager.confirmPayment(order.id, admin);
@@ -172,14 +172,14 @@ test('rejectPayment marca o último comprovante como "rejected" com o motivo, se
     OrderManager.confirmProduct(order.id, product.id);
     PaymentManager.createPaymentRecord(order.id);
     mockFetch(PNG_BUFFER);
-    const proof = await ProofManager.submitProof(order.id, client, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    const proof = await ProofManager.submitProof(order.id, client, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     counter += 1;
     const otherOrder = OrderManager.createOrder({ userId: otherClient, channelId: `p3-proof-rej-other-${counter}` });
     OrderManager.confirmProduct(otherOrder.id, product.id);
     PaymentManager.createPaymentRecord(otherOrder.id);
     mockFetch(PNG_BUFFER);
-    const otherProof = await ProofManager.submitProof(otherOrder.id, otherClient, { url: 'y', name: 'b.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    const otherProof = await ProofManager.submitProof(otherOrder.id, otherClient, { url: 'https://cdn.discordapp.com/attachments/2/2/file2.dat', name: 'b.png', contentType: 'image/png', size: PNG_BUFFER.length });
 
     PaymentManager.openForReview(order.id, admin);
     PaymentManager.rejectPayment(order.id, admin, 'comprovante ilegível');
@@ -206,7 +206,7 @@ test('DUPLA APROVAÇÃO: dois staff clicando "Aprovar" quase ao mesmo tempo no M
     OrderManager.confirmProduct(order.id, product.id);
     PaymentManager.createPaymentRecord(order.id);
     mockFetch(PNG_BUFFER);
-    await ProofManager.submitProof(order.id, client, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    await ProofManager.submitProof(order.id, client, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
     PaymentManager.openForReview(order.id, staffA);
 
     // Simula os dois cliques disputando o mesmo UNDER_REVIEW -> APPROVED
@@ -247,7 +247,7 @@ test('DUPLA APROVAÇÃO: aprovar e recusar quase ao mesmo tempo — só a primei
     OrderManager.confirmProduct(order.id, product.id);
     PaymentManager.createPaymentRecord(order.id);
     mockFetch(PNG_BUFFER);
-    await ProofManager.submitProof(order.id, client, { url: 'x', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
+    await ProofManager.submitProof(order.id, client, { url: 'https://cdn.discordapp.com/attachments/1/1/file.dat', name: 'a.png', contentType: 'image/png', size: PNG_BUFFER.length });
     PaymentManager.openForReview(order.id, staffA);
 
     PaymentManager.confirmPayment(order.id, staffA);
