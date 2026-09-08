@@ -21,7 +21,8 @@ próprio bot Discord.
 - Watchdog, crash-loop protection, auto-restart inteligente.
 - Fila de tarefas com concorrência e prioridade.
 - Manutenção automática (logs, histórico, VACUUM).
-- Docker (isolamento real, rede dedicada por tenant) + PM2 prontos para produção.
+- Isolamento real de bots via `bwrap`/cgroup v2 (ver `SANDBOX.md`), com Docker como opção alternativa por tenant.
+- Serviço persistente via **systemd** (produção) ou PM2 (dev/fallback) — sobrevive a fechar o terminal e a reboot da VPS, com readiness gate fail-closed. Ver [`DEPLOY.md`](./DEPLOY.md).
 
 ---
 

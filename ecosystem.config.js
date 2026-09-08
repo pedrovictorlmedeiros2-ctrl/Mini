@@ -1,3 +1,11 @@
+// ATENÇÃO: PM2 é a opção de DESENVOLVIMENTO/fallback operacional, não a
+// principal de produção — em produção Linux, prefira systemd (ver
+// deploy/atlantic-host.service e DEPLOY.md). Motivos: systemd já vem em
+// qualquer VPS Linux moderna (sem instalar mais nada globalmente),
+// reinicia de verdade após reboot sem passo extra (`pm2 startup` + `pm2
+// save`), e integra logs com o journal do próprio SO (rotação
+// automática). Use PM2 se: você já opera outros processos via PM2, está
+// testando localmente, ou seu provedor não te dá acesso a systemd.
 module.exports = {
   apps: [
     {

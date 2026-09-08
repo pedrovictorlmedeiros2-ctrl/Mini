@@ -1,0 +1,75 @@
+[Unit]
+# Serviço persistente do Atlantic Host — sobrevive ao fechamento do
+# terminal/VS Code e reinicia sozinho após crash, encerramento inesperado
+# ou reboot da VPS. Ver DEPLOY.md pra instalação, comandos e diagnóstico.
+Description=Atlantic Host — bot de hospedagem Discord
+Documentation=https://github.com/pedrovictorlmedeiros2-ctrl/mini
+# Espera a rede estar de pé (login no Discord precisa de internet) e o
+# armazenamento local montado (banco SQLite, pastas de bots/backups).
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# AJUSTE OBRIGATÓRIO: caminho real do checkout do repositório na VPS.
+WorkingDirectory=/opt/atlantic-host
+
+# AJUSTE SE NECESSÁRIO: confirme com `which node` na própria VPS — a
+# versão precisa ser Node 22 ou 24 (node:sqlite nativo).
+ExecStart=/usr/bin/node index.js
+
+# NUNCA coloque segredos aqui. O próprio index.js já carrega ./.env do
+# seu WorkingDirectory (dotenv, ver topo do arquivo) — todo BOT_TOKEN,
+# ENCRYPTION_KEY, GROQ_API_KEY etc. pertence exclusivamente ao .env, com
+# permissão 600, nunca neste arquivo de unit (que costuma ter permissão
+# de leitura mais aberta e pode aparecer em `systemctl cat`/journal).
+Environment=NODE_ENV=production
+
+# AJUSTE OBRIGATÓRIO: usuário e grupo dedicados, NUNCA root. Crie com
+# `useradd --system --home /opt/atlantic-host --shell /usr/sbin/nologin atlantic-host`
+# antes de habilitar o serviço (ver DEPLOY.md — este comando não é
+# executado automaticamente).
+User=atlantic-host
+Group=atlantic-host
+
+# Reinício automático: sim após crash/kill/falha temporária; NÃO depois
+# de um `systemctl stop` deliberado (esse é o significado de on-failure,
+# diferente de "always").
+Restart=on-failure
+RestartSec=5s
+# Disjuntor: no máximo 10 restarts em 5 minutos — impede um crash loop
+# real de ficar reiniciando pra sempre em alta frequência (a proteção de
+# crash loop dos BOTS hospedados já existe em processManager.js; isto é
+# a mesma ideia, um nível acima, pro processo principal).
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Graceful shutdown: o SIGTERM do systemd já é exatamente o que
+# gracefulShutdown() em index.js escuta (para bots hospedados, espera até
+# 7s, depois client.destroy()). Dá uma margem confortável antes do
+# systemd escalar pra SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# Previne duas instâncias apontando pro mesmo banco (defesa em
+# profundidade — o lock de instância em src/utils/instanceLock.js já
+# recusa a segunda por conta própria; isto evita nem tentar).
+# (Não há flag systemd nativa equivalente a "singleton" fora de socket
+# activation — o lock de aplicação é a garantia real.)
+
+# Logs: stdout/stderr vão pro journal por padrão sob systemd (rotação e
+# retenção configuráveis em /etc/systemd/journald.conf — SystemMaxUse=,
+# RuntimeMaxUse= — não precisa de nada extra aqui). Ver DEPLOY.md.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atlantic-host
+
+# Hardening básico — não deveria conflitar com bwrap/user namespaces
+# (que não exigem privilégio adicional neste projeto), mas teste antes
+# de assumir em produção; remova se o bwrap da sua distro depender de
+# setuid-root em vez de user namespaces sem privilégio.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
