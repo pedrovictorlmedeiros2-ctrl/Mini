@@ -109,12 +109,20 @@ function checkAndConsumeRateLimit(limitPerMinute) {
     return true;
 }
 
+// CORREÇÃO (achada em revisão de segurança adversarial): faltavam os
+// códigos de falha de DNS — bem plausíveis numa VPS com DNS temporariamente
+// instável — que fazem uma falha transitória comum nunca ser tentada de
+// novo (sem retry, direto pra `unavailable`). Isolado, não muda nada de
+// segurança (o resultado fail-safe já era o mesmo), só reduz observação
+// auxiliar perdida à toa.
+const RETRYABLE_ERROR_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+
 function isRetryableError(err) {
     if (err?.__invalidJson) return true;
     const status = err?.response?.status;
     if (status === 429) return true;
     if (typeof status === 'number' && status >= 500) return true;
-    if (err?.code === 'ECONNABORTED' || err?.code === 'ETIMEDOUT' || err?.code === 'ECONNREFUSED') return true;
+    if (RETRYABLE_ERROR_CODES.has(err?.code)) return true;
     if (!err?.response && !err?.code) return true; // erro de rede genérico/desconhecido
     return false;
 }
@@ -123,8 +131,36 @@ function backoffDelayMs(attempt) {
     return 500 * Math.pow(3, attempt); // 500ms, 1500ms, 4500ms...
 }
 
+/**
+ * Duração máxima possível de UMA chamada a analyzeThreat() com a config
+ * dada: todas as tentativas gastando o timeout inteiro + todos os backoffs
+ * entre elas. Existe pra quem enfileira a chamada (SecurityMonitor.js)
+ * poder dar uma margem de timeout de FILA que NUNCA mata a tentativa
+ * legítima antes dela terminar — ver achado de revisão de segurança: a
+ * margem fixa antiga (`requestTimeoutMs + 5000`) ficava ABAIXO do pior
+ * caso real sob a config default (maxRetries=1 → até 10500ms de tentativas
+ * legítimas contra uma margem de só 10000ms).
+ *
+ * @param {{requestTimeoutMs:number, maxRetries:number}} cfg
+ */
+function maxPossibleDurationMs(cfg) {
+    const totalAttempts = 1 + Math.max(0, cfg.maxRetries);
+    let totalBackoffMs = 0;
+    for (let i = 0; i < totalAttempts - 1; i++) totalBackoffMs += backoffDelayMs(i);
+    return totalAttempts * cfg.requestTimeoutMs + totalBackoffMs;
+}
+
+// Teto defensivo no tamanho da resposta HTTP: o axios por padrão NÃO limita
+// isto (maxContentLength/maxBodyLength = -1, ou seja, ilimitado — confirmado
+// na versão instalada). Uma resposta legítima do Groq é minúscula
+// (max_tokens:400 do lado do servidor), então 1MB é generoso o bastante pra
+// nunca afetar uso normal, mas impede que um endpoint comprometido/MITM
+// force o processo a bufferizar uma resposta arbitrariamente grande antes
+// de sequer chegar no JSON.parse() de validação.
+const MAX_RESPONSE_BYTES = 1024 * 1024;
+
 async function defaultHttpPost(url, body, axiosConfig) {
-    return axios.post(url, body, axiosConfig);
+    return axios.post(url, body, { ...axiosConfig, maxContentLength: MAX_RESPONSE_BYTES, maxBodyLength: MAX_RESPONSE_BYTES });
 }
 
 /**
@@ -270,6 +306,7 @@ function _getInternalStateForTests() {
 module.exports = {
     analyzeThreat,
     validateAndSanitizeResponse,
+    maxPossibleDurationMs,
     _resetForTests,
     _getInternalStateForTests,
 };

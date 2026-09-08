@@ -114,3 +114,5 @@ conta própria — é a única fonte de verdade.
   meias-palavras.
 - `SECURITY_MONITOR.md` — SecurityMonitor + Groq (Kamikaze Fase 2): analisador
   auxiliar, nunca decide nada sozinho, relatório de validação.
+- `SECURITY_MONITOR_REVIEW.md` — revisão de segurança adversarial da Fase 2
+  (achados corrigidos + riscos abertos, com testes).

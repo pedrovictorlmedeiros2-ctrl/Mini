@@ -285,6 +285,8 @@ a lista comentada completa. Resumo:
 
 ## Documentos relacionados
 
+- `SECURITY_MONITOR_REVIEW.md` — revisão de segurança adversarial desta
+  fase (achados corrigidos + riscos abertos, com testes).
 - `SECURITY_ARCHITECTURE.md` — visão geral de trust boundaries e camadas.
 - `THREAT_MODEL.md` — quem é o atacante, o que ele controla.
 - `SECURITY_AUDIT.md` — achados de auditoria com reprodução.

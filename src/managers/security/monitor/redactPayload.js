@@ -46,11 +46,20 @@ function safeStringify(value) {
  * @param {{maxLength?: number}} [options]
  * @returns {string|null}
  */
+// Teto defensivo no tamanho de ENTRADA antes de rodar qualquer regex —
+// achado em revisão de segurança adversarial: sem isto, um texto livre
+// absurdamente grande (ex.: resposta de um endpoint comprometido/MITM, já
+// que o `summary` do Groq acaba passando por aqui) força as 3 regexes a
+// varrer o texto INTEIRO antes de qualquer corte por tamanho acontecer.
+// Nenhum uso legítimo desta função precisa de mais que uns poucos KB de
+// entrada (a saída final nunca passa de MAX_TEXT_LENGTH mesmo assim).
+const MAX_INPUT_LENGTH_BEFORE_SCRUB = 5000;
+
 function redactText(text, options = {}) {
     if (typeof text !== 'string') return null;
     const maxLength = options.maxLength ?? MAX_TEXT_LENGTH;
 
-    let out = text;
+    let out = text.length > MAX_INPUT_LENGTH_BEFORE_SCRUB ? text.slice(0, MAX_INPUT_LENGTH_BEFORE_SCRUB) : text;
     // Formato de token do Discord bot (3 segmentos separados por ponto).
     out = out.replace(/[\w-]{20,30}\.[\w-]{6,10}\.[\w-]{20,40}/g, '[REDACTED_TOKEN]');
     // "KEY=valor"/"KEY: valor" onde KEY sugere ser um segredo (env-like).

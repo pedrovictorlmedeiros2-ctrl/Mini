@@ -24,7 +24,7 @@
  */
 const { pollNewSecurityEvents } = require('./SignalCollector');
 const { buildGroqEventPayload } = require('./redactPayload');
-const { analyzeThreat: defaultAnalyzeThreat } = require('./GroqThreatAnalyzer');
+const { analyzeThreat: defaultAnalyzeThreat, maxPossibleDurationMs } = require('./GroqThreatAnalyzer');
 const { applyThreatDecision } = require('./ThreatDecisionPolicy');
 const { addToQueue } = require('../../queueManager');
 const { recordAuditEvent } = require('../../auditManager');
@@ -91,11 +91,21 @@ async function pollAndEnqueue() {
     pollInFlight = true;
     try {
         const byBot = pollNewSecurityEvents();
+        // ACHADO DE REVISÃO DE SEGURANÇA: a margem antiga (requestTimeoutMs +
+        // 5000, fixa) ficava ABAIXO do pior caso real de analyzeThreat() sob
+        // a config default (maxRetries=1 já soma até 10500ms de tentativas
+        // legítimas contra uma margem de só 10000ms) — o timeout da FILA
+        // podia matar uma tentativa que ainda estava dentro do próprio
+        // orçamento de retry/backoff do GroqThreatAnalyzer, sem cancelar a
+        // chamada de rede de verdade (só solta o slot da fila mais cedo).
+        // maxPossibleDurationMs() calcula o pior caso real pra config atual,
+        // com uma margem extra por cima.
+        const taskTimeoutMs = maxPossibleDurationMs(config.security.groqMonitor) + 2000;
         for (const [botId, events] of byBot.entries()) {
             addToQueue(
                 () => analyzeBotEvents(botId, events),
                 `groq-monitor:${botId}`,
-                { priority: 'low', timeoutMs: config.security.groqMonitor.requestTimeoutMs + 5000 }
+                { priority: 'low', timeoutMs: taskTimeoutMs }
             ).catch((err) => {
                 // addToQueue só rejeita por timeout da fila ou erro não tratado
                 // dentro de analyzeBotEvents — nunca deveria acontecer com
