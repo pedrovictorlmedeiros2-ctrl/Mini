@@ -24,7 +24,7 @@ function makeUser() {
 }
 function makeProduct(overrides = {}) {
     counter += 1;
-    return ProductCatalog.saveProduct({
+    const product = ProductCatalog.saveProduct({
         id: `omtest-prod-${counter}`,
         name: `Plano ${counter}`,
         price: 39.9,
@@ -33,6 +33,9 @@ function makeProduct(overrides = {}) {
         maxCpu: 40,
         ...overrides,
     });
+    // Produto nasce DRAFT (Fase 3) — precisa ser publicado pra poder ser
+    // usado num pedido (buildProductSnapshot exige PUBLISHED).
+    return ProductCatalog.publishProduct(product.id);
 }
 function makeOrder(userId) {
     counter += 1;

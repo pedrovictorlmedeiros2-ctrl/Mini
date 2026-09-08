@@ -101,6 +101,11 @@ module.exports = {
         // Prazo padrão pra um carrinho expirar se o cliente nunca enviar
         // comprovante (CommerceScheduler.sweepExpiredCarts()).
         cartExpirationHours: parseFloat(process.env.COMMERCE_CART_EXPIRATION_HOURS) || 2,
+        // Comprovantes (Fase 3): cifrados em repouso (fileCrypto.js),
+        // pasta dedicada e separada de `receiptsFolder` (legado, texto
+        // puro) — nunca a mesma pasta.
+        proofsFolder: process.env.COMMERCE_PROOFS_FOLDER || './commerce-proofs',
+        maxProofSizeBytes: parseInt(process.env.COMMERCE_MAX_PROOF_SIZE_BYTES) || 8 * 1024 * 1024, // 8MB
     },
 
     // ─── RECURSOS DO SISTEMA ───

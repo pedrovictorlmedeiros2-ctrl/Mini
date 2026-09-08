@@ -29,7 +29,8 @@ function makeUser() {
 }
 function makeProduct(overrides = {}) {
     counter += 1;
-    return ProductCatalog.saveProduct({ id: `schedtest-prod-${counter}`, name: 'Plano', price: 10, maxBots: 1, maxRam: 256, maxCpu: 30, ...overrides });
+    const product = ProductCatalog.saveProduct({ id: `schedtest-prod-${counter}`, name: 'Plano', price: 10, maxBots: 1, maxRam: 256, maxCpu: 30, ...overrides });
+    return ProductCatalog.publishProduct(product.id);
 }
 
 test('sweepExpiredCarts: expira AWAITING_PAYMENT parado há mais de cartExpirationHours', () => {

@@ -33,6 +33,7 @@ function makeOrderReadyForReview(userId, priceOverride) {
         id: `pmtest-prod-${counter}`, name: 'Plano Teste', price: priceOverride ?? 49.9,
         maxBots: 2, maxRam: 512, maxCpu: 40,
     });
+    ProductCatalog.publishProduct(product.id); // Fase 3: produto nasce draft, precisa publicar pra ser comprável
     OrderManager.confirmProduct(order.id, product.id);
     PaymentManager.createPaymentRecord(order.id);
     OrderManager.transitionOrder(order.id, [OrderManager.STATUS.AWAITING_PAYMENT], OrderManager.STATUS.PROOF_SUBMITTED);
@@ -44,6 +45,7 @@ test('createPaymentRecord: snapshota os dados Pix de sales_config no momento da 
     counter += 1;
     const order = OrderManager.createOrder({ userId, channelId: `pmtest-snap-${counter}` });
     const product = ProductCatalog.saveProduct({ id: `pmtest-snap-prod-${counter}`, name: 'X', price: 10, maxBots: 1, maxRam: 256, maxCpu: 30 });
+    ProductCatalog.publishProduct(product.id);
     OrderManager.confirmProduct(order.id, product.id);
 
     const payment = PaymentManager.createPaymentRecord(order.id);
@@ -64,6 +66,7 @@ test('createPaymentRecord: idempotente — chamar duas vezes não duplica', () =
     counter += 1;
     const order = OrderManager.createOrder({ userId, channelId: `pmtest-idem-${counter}` });
     const product = ProductCatalog.saveProduct({ id: `pmtest-idem-prod-${counter}`, name: 'X', price: 10, maxBots: 1, maxRam: 256, maxCpu: 30 });
+    ProductCatalog.publishProduct(product.id);
     OrderManager.confirmProduct(order.id, product.id);
 
     PaymentManager.createPaymentRecord(order.id);

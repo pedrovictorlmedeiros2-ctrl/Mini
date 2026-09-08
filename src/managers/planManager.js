@@ -76,20 +76,21 @@ async function activateUserPlan(userId, planId, client, guild = null) {
     const plan = getPlan(planId);
     if (!plan) throw new Error('Plano não encontrado');
 
-    // 1. Atualiza no banco (com teto de segurança do host)
-    // Mesmo que o plano diga 8GB, no PC a gente limita pelo HOST_MAX_* pra não derrubar a máquina
-    const hostRamCap = Number(process.env.HOST_MAX_RAM_PER_BOT) || 512;
-    const hostCpuCap = Number(process.env.HOST_MAX_CPU_PER_BOT) || 50;
-    const hostBotsCap = Number(process.env.HOST_MAX_BOTS_PER_USER) || 10;
-
-    const safeRam = Math.min(Number(plan.max_ram) || 256, hostRamCap);
-    const safeCpu = Math.min(Number(plan.max_cpu) || 30, hostCpuCap);
-    const safeBots = Math.min(Number(plan.max_bots) || 1, hostBotsCap);
-
-    run(
-        "UPDATE users SET plan_id = ?, max_bots = ?, max_ram = ?, max_cpu = ?, updated_at = datetime('now') WHERE id = ?",
-        [planId, safeBots, safeRam, safeCpu, userId]
-    );
+    // 1. Marca o plano do usuário e recalcula a capacidade efetiva.
+    //
+    // CORREÇÃO (Fase 3 — fonte única de capacidade): este UPDATE costumava
+    // calcular e escrever max_bots/max_ram/max_cpu diretamente aqui, com
+    // sua própria cópia da lógica de teto de host (HOST_MAX_*). O novo
+    // sistema comercial (commerce/EntitlementManager.js) também escrevia
+    // nas MESMAS colunas, de forma independente — duas fontes de verdade
+    // podendo se sobrescrever silenciosamente. Agora as duas delegam pra
+    // capacityManager.recomputeUserCapacity(), que decide com uma
+    // precedência única e documentada (Entitlement ativo > plan_id
+    // legado > default) e é o ÚNICO lugar que de fato escreve nessas
+    // colunas — ver o comentário normativo em capacityManager.js.
+    run("UPDATE users SET plan_id = ?, updated_at = datetime('now') WHERE id = ?", [planId, userId]);
+    const capacityManager = require('./capacityManager');
+    capacityManager.recomputeUserCapacity(userId);
 
     // 2. Gerencia cargos no Discord (se o client for fornecido)
     if (client) {

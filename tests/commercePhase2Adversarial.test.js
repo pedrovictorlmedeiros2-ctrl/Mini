@@ -37,7 +37,8 @@ function makeUser(role = 'client') {
 }
 function makeProduct(overrides = {}) {
     counter += 1;
-    return ProductCatalog.saveProduct({ id: `advcomm-prod-${counter}`, name: 'Plano', price: 49.9, maxBots: 2, maxRam: 512, maxCpu: 40, ...overrides });
+    const product = ProductCatalog.saveProduct({ id: `advcomm-prod-${counter}`, name: 'Plano', price: 49.9, maxBots: 2, maxRam: 512, maxCpu: 40, ...overrides });
+    return ProductCatalog.publishProduct(product.id); // Fase 3: precisa estar PUBLISHED pra ser comprável
 }
 
 // ────────────────────────────────────────────────────────────────────────

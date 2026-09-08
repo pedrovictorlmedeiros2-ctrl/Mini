@@ -1,0 +1,662 @@
+/**
+ * DOMÍNIO: COMMERCE (Fase 3 — UI dentro do Discord)
+ *
+ * Camada de interação — monta embeds/botões/modais e delega TODA regra
+ * de negócio pros managers de `src/managers/commerce/`. Nunca decide
+ * nada sozinho: preço, permissão, snapshot, transição de estado — tudo
+ * isso já vem calculado/validado dos managers.
+ *
+ * Convenção de permissão (defesa em profundidade, arquitetura §10): todo
+ * handler sensível REVALIDA permissão aqui (pra dar uma resposta de erro
+ * rápida e clara) E os managers chamados por baixo TAMBÉM revalidam
+ * (nunca confiam só nesta camada) — ver PaymentManager/ProofManager/
+ * CommerceStaffManager, que já fazem isso independentemente desta UI.
+ *
+ * IDs vindos do Discord (customId, valores de select/modal) são sempre
+ * tratados como adversariais — nunca usados pra decidir algo sem passar
+ * pelo manager correspondente re-checar dono/permissão/estado.
+ */
+const {
+    EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
+    ModalBuilder, TextInputBuilder, TextInputStyle,
+    StringSelectMenuBuilder, AttachmentBuilder, ChannelType, PermissionFlagsBits,
+} = require('discord.js');
+const { get, run, query } = require('../../database/database');
+const config = require('../../../config');
+const { hasPermission, registerUser } = require('../../managers/userManager');
+const { checkRateLimit, formatRetryAfter } = require('../../utils/rateLimiter');
+
+const ProductCatalog = require('../../managers/commerce/ProductCatalog');
+const OrderManager = require('../../managers/commerce/OrderManager');
+const PaymentManager = require('../../managers/commerce/PaymentManager');
+const ProofManager = require('../../managers/commerce/ProofManager');
+const CommerceStaffManager = require('../../managers/commerce/CommerceStaffManager');
+const CommerceConfig = require('../../managers/commerce/CommerceConfig');
+
+const EXACT = [
+    'commerce_view_plans', 'commerce_buy_plan', 'commerce_support', 'commerce_pay',
+    'commerce_send_proof', 'commerce_cancel_order', 'commerce_select_product',
+    'commerce_staff_queue', 'commerce_staff_select_order',
+    'commerce_admin_products', 'commerce_admin_create_product', 'modal_commerce_admin_create_product',
+    'commerce_admin_select_product', 'commerce_admin_config_pix', 'modal_commerce_admin_config_pix',
+    'commerce_admin_stats', 'commerce_admin_audit',
+];
+const PREFIXES = [
+    'commerce_staff_view_proof_', 'commerce_staff_approve_', 'commerce_staff_reject_', 'modal_commerce_staff_reject_',
+    'commerce_admin_publish_product_', 'commerce_admin_pause_product_', 'commerce_admin_archive_product_',
+];
+
+function match(customId) {
+    if (EXACT.includes(customId)) return true;
+    return PREFIXES.some((p) => customId.startsWith(p));
+}
+
+// ── Helpers de embed/exibição — nunca contêm lógica de negócio ──────────
+
+function formatMoney(value) {
+    return `R$ ${Number(value).toFixed(2)}`;
+}
+
+function productSummaryLine(p) {
+    return `**${p.name}** — \`${formatMoney(p.price)}/mês\`\n> 🤖 ${p.max_bots} bot(s) · 🧠 ${p.max_ram}MB RAM · ⚡ ${p.max_cpu}% CPU`;
+}
+
+async function notifyBuyer(client, userId, content) {
+    try {
+        const user = await client.users.fetch(userId);
+        await user.send(content);
+    } catch { /* DM fechada — nunca bloqueia o fluxo */ }
+}
+
+async function postToChannel(guild, channelId, payload) {
+    if (!channelId) return;
+    const channel = guild.channels.cache.get(channelId);
+    if (channel) await channel.send(payload).catch(() => {});
+}
+
+// ── PAINÉIS PUBLICADOS PELOS COMANDOS (/painel-de-vendas, /painel-comercial) ──
+
+async function publishStorefront(interaction) {
+    const embed = new EmbedBuilder()
+        .setColor('#00AAFF')
+        .setTitle('🛒 Loja Atlantic Host')
+        .setDescription('Escolha um plano de hospedagem abaixo. Precisa de ajuda? Use o canal de dúvidas.');
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('commerce_buy_plan').setLabel('Comprar Plano').setEmoji('🛒').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('commerce_view_plans').setLabel('Ver Planos').setEmoji('📋').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('commerce_support').setLabel('Suporte').setEmoji('💬').setStyle(ButtonStyle.Secondary)
+    );
+    await interaction.reply({ embeds: [embed], components: [row] });
+}
+
+async function publishStaffPanel(interaction) {
+    if (!hasPermission(interaction.user.id, 'admin')) {
+        return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+    }
+    const embed = new EmbedBuilder()
+        .setColor('#FFAA00')
+        .setTitle('💼 Painel Comercial')
+        .setDescription('Gerencie produtos, revise pedidos e acompanhe as vendas.');
+    const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('commerce_staff_queue').setLabel('Pedidos em Análise').setEmoji('📋').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('commerce_admin_products').setLabel('Produtos').setEmoji('📦').setStyle(ButtonStyle.Secondary)
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('commerce_admin_config_pix').setLabel('Configurar Pix').setEmoji('💰').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('commerce_admin_stats').setLabel('Estatísticas').setEmoji('📈').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('commerce_admin_audit').setLabel('Auditoria').setEmoji('🧾').setStyle(ButtonStyle.Secondary)
+    );
+    await interaction.reply({ embeds: [embed], components: [row1, row2] });
+}
+
+async function handle(interaction, helpers = {}) {
+    const customId = interaction.customId;
+    registerUser(interaction.user);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // CLIENTE (loja pública)
+    // ═══════════════════════════════════════════════════════════════════
+
+    if (customId === 'commerce_view_plans') {
+        const plans = ProductCatalog.getPublishedProducts();
+        if (plans.length === 0) {
+            return interaction.reply({ content: '❌ Nenhum plano disponível no momento.', ephemeral: true });
+        }
+        const embed = new EmbedBuilder()
+            .setColor('#00AAFF')
+            .setTitle('📋 Planos Disponíveis')
+            .setDescription(plans.map(productSummaryLine).join('\n\n'));
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('commerce_buy_plan').setLabel('Comprar Plano').setEmoji('🛒').setStyle(ButtonStyle.Success)
+        );
+        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    }
+
+    if (customId === 'commerce_support') {
+        const cfg = CommerceConfig.getConfig();
+        const channelMention = cfg?.faq_channel_id ? `<#${cfg.faq_channel_id}>` : 'o canal de dúvidas';
+        return interaction.reply({ content: `💬 Tire suas dúvidas em ${channelMention} — nossa equipe responde por lá.`, ephemeral: true });
+    }
+
+    if (customId === 'commerce_buy_plan') {
+        const existingOrder = get(
+            `SELECT channel_id FROM commerce_orders WHERE user_id = ? AND status IN ('DRAFT','AWAITING_PAYMENT','PROOF_SUBMITTED','UNDER_REVIEW')`,
+            [interaction.user.id]
+        );
+        if (existingOrder) {
+            return interaction.reply({ content: `❌ Você já possui um pedido em andamento: <#${existingOrder.channel_id}>`, ephemeral: true });
+        }
+
+        const cartLimit = checkRateLimit(`commerce_cart:${interaction.user.id}`, 10, 60 * 60 * 1000);
+        if (!cartLimit.allowed) {
+            return interaction.reply({ content: `❌ Muitos pedidos criados recentemente. Tente novamente em ${formatRetryAfter(cartLimit.retryAfterMs)}.`, ephemeral: true });
+        }
+
+        await interaction.reply({ content: '⏳ Criando seu pedido...', ephemeral: true });
+
+        let channel;
+        try {
+            const guild = interaction.guild;
+            const cfg = CommerceConfig.getConfig();
+            const permissionOverwrites = [
+                { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+            ];
+            if (cfg?.staff_role_id) {
+                permissionOverwrites.push({ id: cfg.staff_role_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+            }
+
+            channel = await guild.channels.create({
+                name: `pedido-${interaction.user.username}`.slice(0, 90),
+                type: ChannelType.GuildText,
+                parent: cfg?.public_category_id || undefined,
+                permissionOverwrites,
+            });
+
+            const order = OrderManager.createOrder({ userId: interaction.user.id, channelId: channel.id, guildId: guild.id });
+
+            const products = ProductCatalog.getPublishedProducts();
+            if (products.length === 0) {
+                await channel.send('❌ Nenhum plano disponível no momento. Este canal será fechado em 10 segundos.');
+                setTimeout(() => channel.delete().catch(() => {}), 10000);
+                return interaction.editReply({ content: '❌ Nenhum plano disponível no momento.' });
+            }
+
+            const select = new StringSelectMenuBuilder()
+                .setCustomId('commerce_select_product')
+                .setPlaceholder('Selecione um plano...')
+                .addOptions(products.slice(0, 25).map((p) => ({
+                    label: p.name,
+                    description: `${formatMoney(p.price)}/mês | ${p.max_bots} bot(s) | ${p.max_ram}MB RAM`,
+                    value: p.id,
+                })));
+            const row = new ActionRowBuilder().addComponents(select);
+            const cancelRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('commerce_cancel_order').setLabel('Cancelar Pedido').setEmoji('❌').setStyle(ButtonStyle.Danger)
+            );
+
+            const embed = new EmbedBuilder()
+                .setColor('#00AAFF')
+                .setTitle('🛒 Seu Pedido')
+                .setDescription(`Olá ${interaction.user}, selecione um plano abaixo pra continuar.`);
+
+            await channel.send({ content: `${interaction.user}`, embeds: [embed], components: [row, cancelRow] });
+            await interaction.editReply({ content: `✅ Pedido criado: ${channel}` });
+        } catch (err) {
+            console.error('❌ Erro ao criar pedido comercial:', err);
+            if (channel?.deletable) {
+                try { await channel.delete('Erro ao criar pedido — limpeza automática'); } catch { /* ignora */ }
+            }
+            await interaction.editReply({ content: '❌ Erro ao criar seu pedido. Tente novamente ou avise a equipe de suporte.' });
+        }
+        return;
+    }
+
+    if (customId === 'commerce_select_product') {
+        const order = OrderManager.getOrderByChannel(interaction.channelId);
+        if (!order) return interaction.reply({ content: '❌ Pedido não encontrado.', ephemeral: true });
+        // Só o dono do canal pode selecionar — canal já é privado por
+        // permissão do Discord, mas revalida contra o banco de qualquer
+        // forma (IDs vindos do Discord são tratados como adversariais).
+        if (order.user_id !== interaction.user.id) {
+            return interaction.reply({ content: '❌ Este pedido não é seu.', ephemeral: true });
+        }
+
+        const productId = interaction.values[0];
+        let updatedOrder;
+        try {
+            updatedOrder = OrderManager.confirmProduct(order.id, productId);
+            PaymentManager.createPaymentRecord(updatedOrder.id);
+        } catch (err) {
+            return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+        }
+
+        const snapshot = JSON.parse(updatedOrder.product_snapshot);
+        const embed = new EmbedBuilder()
+            .setColor('#00AAFF')
+            .setTitle('🧾 Resumo do Pedido')
+            .setDescription(
+                `**Plano:** \`${snapshot.name}\`\n` +
+                `**Valor:** \`${formatMoney(updatedOrder.total_price)}\`\n` +
+                `**Recursos:** 🤖 ${snapshot.maxBots} bot(s) · 🧠 ${snapshot.maxRam}MB RAM · ⚡ ${snapshot.maxCpu}% CPU\n\n` +
+                `Confira os dados acima. Quando estiver pronto, clique em **Pagar** pra ver os dados do Pix.`
+            );
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('commerce_pay').setLabel('Pagar').setEmoji('💳').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('commerce_cancel_order').setLabel('Cancelar Pedido').setEmoji('❌').setStyle(ButtonStyle.Danger)
+        );
+        return interaction.update({ embeds: [embed], components: [row] });
+    }
+
+    if (customId === 'commerce_pay') {
+        const order = OrderManager.getOrderByChannel(interaction.channelId);
+        if (!order || order.user_id !== interaction.user.id) {
+            return interaction.reply({ content: '❌ Pedido não encontrado.', ephemeral: true });
+        }
+        const payment = PaymentManager.getPaymentByOrder(order.id);
+        if (!payment) return interaction.reply({ content: '❌ Selecione um plano antes de pagar.', ephemeral: true });
+
+        const embed = new EmbedBuilder()
+            .setColor('#00FF00')
+            .setTitle('💳 Pagamento via Pix')
+            .setDescription(
+                `**Valor:** \`${formatMoney(payment.expected_amount)}\`\n` +
+                `**Chave Pix:** \`${payment.pix_key_snapshot || 'Não configurada — avise o suporte'}\`\n` +
+                `**Beneficiário:** \`${payment.pix_name_snapshot || 'Atlantic Host'}\`\n` +
+                `**Cidade:** \`${payment.pix_city_snapshot || 'São Paulo'}\`\n\n` +
+                `Depois de pagar, clique em **Enviar Comprovante**.`
+            );
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('commerce_send_proof').setLabel('Enviar Comprovante').setEmoji('📎').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('commerce_cancel_order').setLabel('Cancelar Pedido').setEmoji('❌').setStyle(ButtonStyle.Danger)
+        );
+        return interaction.update({ embeds: [embed], components: [row] });
+    }
+
+    if (customId === 'commerce_send_proof') {
+        const order = OrderManager.getOrderByChannel(interaction.channelId);
+        if (!order || order.user_id !== interaction.user.id) {
+            return interaction.reply({ content: '❌ Pedido não encontrado.', ephemeral: true });
+        }
+
+        await interaction.reply({
+            content: `📤 Envie a imagem (JPG/PNG/WEBP) ou PDF do seu comprovante agora (máx. ${Math.round(config.commerce.maxProofSizeBytes / (1024 * 1024))}MB).`,
+            ephemeral: true,
+        });
+
+        const filter = (m) => m.author.id === interaction.user.id && m.attachments.size > 0;
+        const collector = interaction.channel.createMessageCollector({ filter, max: 1, time: 300000 });
+
+        collector.on('collect', async (m) => {
+            const attachment = m.attachments.first();
+            try {
+                await ProofManager.submitProof(order.id, interaction.user.id, {
+                    url: attachment.url, name: attachment.name, contentType: attachment.contentType, size: attachment.size,
+                });
+
+                const embed = new EmbedBuilder()
+                    .setColor('#FFFF00')
+                    .setTitle('⏳ Comprovante Recebido!')
+                    .setDescription('Seu comprovante foi recebido e está aguardando revisão. Você será notificado assim que for analisado.');
+                await interaction.channel.send({ embeds: [embed] });
+
+                const cfg = CommerceConfig.getConfig();
+                await postToChannel(interaction.guild, cfg?.orders_review_channel_id, {
+                    content: `📥 Novo comprovante — pedido #${order.id} de <@${interaction.user.id}> (${formatMoney(OrderManager.getOrder(order.id).total_price)}).`,
+                });
+            } catch (err) {
+                await interaction.channel.send(`❌ ${err.message}`);
+            } finally {
+                await m.delete().catch(() => {});
+            }
+        });
+        return;
+    }
+
+    if (customId === 'commerce_cancel_order') {
+        const order = OrderManager.getOrderByChannel(interaction.channelId);
+        if (order && order.user_id === interaction.user.id) {
+            try {
+                OrderManager.cancelOrder(order.id);
+            } catch (err) {
+                return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+            }
+        }
+        await interaction.reply({ content: '❌ Pedido cancelado. Este canal será excluído em 5 segundos.' });
+        setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // STAFF (revisão de pedidos) — Administrator ou COMMERCE_STAFF ativo
+    // ═══════════════════════════════════════════════════════════════════
+
+    if (customId === 'commerce_staff_queue') {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const pending = query(
+            `SELECT o.*, u.username FROM commerce_orders o JOIN users u ON o.user_id = u.id
+             WHERE o.status IN ('PROOF_SUBMITTED','UNDER_REVIEW') ORDER BY o.updated_at ASC`
+        );
+        if (pending.length === 0) {
+            return interaction.reply({ content: '✅ Nenhum pedido aguardando análise no momento.', ephemeral: true });
+        }
+        const embed = new EmbedBuilder()
+            .setColor('#FFFF00')
+            .setTitle('📋 Pedidos em Análise')
+            .setDescription(pending.map((o) => `🔹 **#${o.id}** — \`${o.username}\` — \`${formatMoney(o.total_price)}\` (${o.status})`).join('\n'));
+        const select = new StringSelectMenuBuilder()
+            .setCustomId('commerce_staff_select_order')
+            .setPlaceholder('Selecione um pedido...')
+            .addOptions(pending.slice(0, 25).map((o) => ({ label: `Pedido #${o.id} — ${o.username}`, description: formatMoney(o.total_price), value: String(o.id) })));
+        const row = new ActionRowBuilder().addComponents(select);
+        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    }
+
+    if (customId === 'commerce_staff_select_order') {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const orderId = Number(interaction.values[0]);
+        const order = OrderManager.getOrder(orderId);
+        if (!order) return interaction.reply({ content: '❌ Pedido não encontrado (já processado?).', ephemeral: true });
+
+        if (order.status === OrderManager.STATUS.PROOF_SUBMITTED) {
+            try { PaymentManager.openForReview(order.id, interaction.user.id); } catch { /* outro staff pode ter aberto primeiro — segue exibindo mesmo assim */ }
+        }
+
+        const snapshot = order.product_snapshot ? JSON.parse(order.product_snapshot) : null;
+        const buyer = get('SELECT username FROM users WHERE id = ?', [order.user_id]);
+        const embed = new EmbedBuilder()
+            .setColor('#FFFF00')
+            .setTitle(`🧐 Pedido #${order.id}`)
+            .setDescription(
+                `**Cliente:** \`${buyer?.username || order.user_id}\` (<@${order.user_id}>)\n` +
+                `**Plano:** \`${snapshot?.name || '—'}\`\n` +
+                `**Valor Total:** \`${formatMoney(order.total_price)}\`\n` +
+                `**Status:** \`${order.status}\``
+            );
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`commerce_staff_view_proof_${order.id}`).setLabel('Ver Comprovante').setEmoji('🔍').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`commerce_staff_approve_${order.id}`).setLabel('Aprovar').setEmoji('✅').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`commerce_staff_reject_${order.id}`).setLabel('Recusar').setEmoji('❌').setStyle(ButtonStyle.Danger)
+        );
+        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    }
+
+    if (customId.startsWith('commerce_staff_view_proof_')) {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const orderId = Number(customId.replace('commerce_staff_view_proof_', ''));
+        const proof = ProofManager.getLatestProofForOrder(orderId);
+        if (!proof) return interaction.reply({ content: '❌ Nenhum comprovante encontrado para este pedido.', ephemeral: true });
+
+        try {
+            // getDecryptedProof já audita a visualização e já re-checa
+            // permissão internamente — resposta SEMPRE ephemeral, nunca
+            // visível a outros clientes/canal público.
+            const { buffer, originalFilename } = ProofManager.getDecryptedProof(proof.id, interaction.user.id);
+            const attachment = new AttachmentBuilder(buffer, { name: originalFilename || 'comprovante' });
+            return interaction.reply({ files: [attachment], ephemeral: true });
+        } catch (err) {
+            return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+        }
+    }
+
+    if (customId.startsWith('commerce_staff_approve_')) {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const orderId = Number(customId.replace('commerce_staff_approve_', ''));
+        await interaction.deferReply({ ephemeral: true });
+
+        let result;
+        try {
+            result = PaymentManager.confirmPayment(orderId, interaction.user.id);
+        } catch (err) {
+            return interaction.editReply({ content: `⚠️ ${err.message}` });
+        }
+
+        const order = result.order;
+        await notifyBuyer(
+            interaction.client, order.user_id,
+            `✅ **Seu pagamento foi aprovado!** Pedido #${order.id}.\n` +
+            `Seu plano será ativado assim que o provisionamento for concluído — você será avisado.`
+        );
+        const cfg = CommerceConfig.getConfig();
+        await postToChannel(interaction.guild, cfg?.sales_log_channel_id, {
+            content: `✅ Pedido #${order.id} aprovado por <@${interaction.user.id}> — \`${formatMoney(order.total_price)}\`${result.couponWarning ? ' ⚠️ cupom acima do limite' : ''}.`,
+        });
+        await postToChannel(interaction.guild, cfg?.proofs_channel_id, {
+            content: `📄 Comprovante do pedido #${order.id} revisado (aceito) por <@${interaction.user.id}>.`,
+        });
+
+        const channel = interaction.guild.channels.cache.get(order.channel_id);
+        if (channel) {
+            await channel.send('✅ **Pagamento Aprovado!** Este canal será fechado em 10 segundos.');
+            setTimeout(() => channel.delete().catch(() => {}), 10000);
+        }
+        return interaction.editReply({ content: `✅ Pedido #${order.id} aprovado com sucesso!${result.couponWarning ? ' ⚠️ cupom acima do limite — verifique.' : ''}` });
+    }
+
+    if (customId.startsWith('commerce_staff_reject_')) {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const orderId = customId.replace('commerce_staff_reject_', '');
+        const modal = new ModalBuilder()
+            .setCustomId(`modal_commerce_staff_reject_${orderId}`)
+            .setTitle('❌ Recusar Pedido')
+            .addComponents(new ActionRowBuilder().addComponents(
+                new TextInputBuilder().setCustomId('reason').setLabel('Motivo da Recusa').setStyle(TextInputStyle.Paragraph)
+                    .setPlaceholder('Ex: Comprovante inválido ou valor incorreto.').setRequired(true)
+            ));
+        return interaction.showModal(modal);
+    }
+
+    if (customId.startsWith('modal_commerce_staff_reject_')) {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const orderId = Number(customId.replace('modal_commerce_staff_reject_', ''));
+        const reason = interaction.fields.getTextInputValue('reason');
+
+        let order;
+        try {
+            order = PaymentManager.rejectPayment(orderId, interaction.user.id, reason);
+        } catch (err) {
+            return interaction.reply({ content: `⚠️ ${err.message}`, ephemeral: true });
+        }
+
+        await notifyBuyer(interaction.client, order.user_id, `❌ **Seu pagamento foi recusado.**\nPedido #${order.id}\n**Motivo:** ${reason}`);
+        const cfg = CommerceConfig.getConfig();
+        await postToChannel(interaction.guild, cfg?.sales_log_channel_id, { content: `❌ Pedido #${order.id} recusado por <@${interaction.user.id}> — motivo: ${reason}` });
+        await postToChannel(interaction.guild, cfg?.proofs_channel_id, { content: `📄 Comprovante do pedido #${order.id} revisado (recusado) por <@${interaction.user.id}>.` });
+
+        const channel = interaction.guild.channels.cache.get(order.channel_id);
+        if (channel) {
+            await channel.send(`❌ **Pagamento Recusado!**\n**Motivo:** ${reason}\nEste canal será fechado em 10 segundos.`);
+            setTimeout(() => channel.delete().catch(() => {}), 10000);
+        }
+        return interaction.reply({ content: `❌ Pedido #${order.id} recusado.`, ephemeral: true });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ADMIN (produtos, Pix, estatísticas, auditoria) — só Administrator
+    // ═══════════════════════════════════════════════════════════════════
+
+    if (customId === 'commerce_admin_products') {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+
+        const products = ProductCatalog.getAllProducts();
+        const embed = new EmbedBuilder()
+            .setColor('#FFAA00')
+            .setTitle('📦 Produtos')
+            .setDescription(products.length ? products.map((p) => `\`${p.status}\` **${p.name}** — ${formatMoney(p.price)} (\`${p.id}\`)`).join('\n') : 'Nenhum produto cadastrado.');
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('commerce_admin_create_product').setLabel('Criar Produto').setEmoji('➕').setStyle(ButtonStyle.Success)
+        );
+        const components = [row];
+        if (products.length) {
+            const select = new StringSelectMenuBuilder()
+                .setCustomId('commerce_admin_select_product')
+                .setPlaceholder('Selecione um produto pra gerenciar...')
+                .addOptions(products.slice(0, 25).map((p) => ({ label: `${p.name} (${p.status})`, description: formatMoney(p.price), value: p.id })));
+            components.unshift(new ActionRowBuilder().addComponents(select));
+        }
+        return interaction.reply({ embeds: [embed], components, ephemeral: true });
+    }
+
+    if (customId === 'commerce_admin_create_product') {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        const modal = new ModalBuilder()
+            .setCustomId('modal_commerce_admin_create_product')
+            .setTitle('➕ Criar Produto')
+            .addComponents(
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('id').setLabel('ID interno (único, sem espaços)').setStyle(TextInputStyle.Short).setRequired(true)),
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Nome').setStyle(TextInputStyle.Short).setRequired(true)),
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Preço mensal (ex: 29.90)').setStyle(TextInputStyle.Short).setRequired(true)),
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('resources').setLabel('Bots,RAM(MB),CPU(%) — ex: 2,512,40').setStyle(TextInputStyle.Short).setRequired(true)),
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Descrição (opcional)').setStyle(TextInputStyle.Paragraph).setRequired(false))
+            );
+        return interaction.showModal(modal);
+    }
+
+    if (customId === 'modal_commerce_admin_create_product') {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        const id = interaction.fields.getTextInputValue('id').trim().toLowerCase().replace(/\s+/g, '-');
+        const name = interaction.fields.getTextInputValue('name').trim();
+        const price = parseFloat(interaction.fields.getTextInputValue('price').replace(',', '.'));
+        const [maxBots, maxRam, maxCpu] = interaction.fields.getTextInputValue('resources').split(',').map((v) => parseInt(v.trim(), 10));
+        const description = interaction.fields.getTextInputValue('description') || null;
+
+        if (!Number.isFinite(price) || price < 0 || ![maxBots, maxRam, maxCpu].every(Number.isFinite)) {
+            return interaction.reply({ content: '❌ Valores inválidos — confira preço e recursos (formato: bots,ram,cpu).', ephemeral: true });
+        }
+
+        try {
+            const product = ProductCatalog.saveProduct({ id, name, price, maxBots, maxRam, maxCpu, description });
+            return interaction.reply({ content: `✅ Produto \`${product.id}\` criado como **rascunho**. Publique-o em "Produtos" quando estiver pronto.`, ephemeral: true });
+        } catch (err) {
+            return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+        }
+    }
+
+    if (customId === 'commerce_admin_select_product') {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        const productId = interaction.values[0];
+        const product = ProductCatalog.getProduct(productId);
+        if (!product) return interaction.reply({ content: '❌ Produto não encontrado.', ephemeral: true });
+
+        const embed = new EmbedBuilder()
+            .setColor('#FFAA00')
+            .setTitle(`📦 ${product.name}`)
+            .setDescription(
+                `**Status:** \`${product.status}\`\n**Preço:** \`${formatMoney(product.price)}/mês\`\n` +
+                `**Recursos:** 🤖 ${product.max_bots} · 🧠 ${product.max_ram}MB · ⚡ ${product.max_cpu}%\n` +
+                (product.description ? `**Descrição:** ${product.description}\n` : '')
+            );
+
+        const buttons = [];
+        if ([ProductCatalog.PRODUCT_STATUS.DRAFT, ProductCatalog.PRODUCT_STATUS.PAUSED].includes(product.status)) {
+            buttons.push(new ButtonBuilder().setCustomId(`commerce_admin_publish_product_${product.id}`).setLabel('Publicar').setEmoji('🚀').setStyle(ButtonStyle.Success));
+        }
+        if (product.status === ProductCatalog.PRODUCT_STATUS.PUBLISHED) {
+            buttons.push(new ButtonBuilder().setCustomId(`commerce_admin_pause_product_${product.id}`).setLabel('Pausar').setEmoji('⏸️').setStyle(ButtonStyle.Secondary));
+        }
+        if (product.status !== ProductCatalog.PRODUCT_STATUS.ARCHIVED) {
+            buttons.push(new ButtonBuilder().setCustomId(`commerce_admin_archive_product_${product.id}`).setLabel('Arquivar').setEmoji('🗄️').setStyle(ButtonStyle.Danger));
+        }
+        const row = new ActionRowBuilder().addComponents(buttons);
+        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    }
+
+    if (customId.startsWith('commerce_admin_publish_product_') || customId.startsWith('commerce_admin_pause_product_') || customId.startsWith('commerce_admin_archive_product_')) {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+
+        let productIdParsed, fn, label;
+        if (customId.startsWith('commerce_admin_publish_product_')) {
+            productIdParsed = customId.replace('commerce_admin_publish_product_', ''); fn = ProductCatalog.publishProduct; label = 'publicado';
+        } else if (customId.startsWith('commerce_admin_pause_product_')) {
+            productIdParsed = customId.replace('commerce_admin_pause_product_', ''); fn = ProductCatalog.pauseProduct; label = 'pausado';
+        } else {
+            productIdParsed = customId.replace('commerce_admin_archive_product_', ''); fn = ProductCatalog.archiveProduct; label = 'arquivado';
+        }
+
+        try {
+            const product = fn(productIdParsed);
+            return interaction.reply({ content: `✅ Produto \`${product.id}\` ${label}.`, ephemeral: true });
+        } catch (err) {
+            return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+        }
+    }
+
+    if (customId === 'commerce_admin_config_pix') {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        const modal = new ModalBuilder()
+            .setCustomId('modal_commerce_admin_config_pix')
+            .setTitle('💰 Configurar Pix')
+            .addComponents(
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pix_key').setLabel('Chave Pix').setStyle(TextInputStyle.Short).setRequired(true)),
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pix_name').setLabel('Nome do beneficiário').setStyle(TextInputStyle.Short).setRequired(true)),
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pix_city').setLabel('Cidade').setStyle(TextInputStyle.Short).setRequired(true))
+            );
+        return interaction.showModal(modal);
+    }
+
+    if (customId === 'modal_commerce_admin_config_pix') {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        const pixKey = interaction.fields.getTextInputValue('pix_key').trim();
+        const pixName = interaction.fields.getTextInputValue('pix_name').trim();
+        const pixCity = interaction.fields.getTextInputValue('pix_city').trim();
+
+        run('UPDATE sales_config SET pix_key = ?, pix_name = ?, pix_city = ? WHERE id = 1', [pixKey, pixName, pixCity]);
+        // Auditoria SEM o valor da chave — só o fato de que foi alterada e
+        // por quem (nunca colocar segredo/dado sensível em log — a chave
+        // Pix do beneficiário não é um "segredo" no sentido de token, mas
+        // é dado financeiro; tratamos com a mesma cautela por padrão).
+        const { recordAuditEvent } = require('../../managers/auditManager');
+        recordAuditEvent({ userId: interaction.user.id, event: 'commerce:pix_configured', details: JSON.stringify({ configuredBy: interaction.user.id }), severity: 'info' });
+
+        return interaction.reply({ content: '✅ Dados Pix atualizados.', ephemeral: true });
+    }
+
+    if (customId === 'commerce_admin_stats') {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+
+        const counts = {};
+        for (const status of Object.values(OrderManager.STATUS)) {
+            counts[status] = get('SELECT COUNT(*) as c FROM commerce_orders WHERE status = ?', [status]).c;
+        }
+        const monthRevenue = get(
+            `SELECT COALESCE(SUM(total_price),0) as total FROM commerce_orders WHERE status IN ('APPROVED','PROVISIONING','ACTIVE') AND strftime('%Y-%m', updated_at) = strftime('%Y-%m','now')`
+        ).total;
+        const activeEntitlements = get("SELECT COUNT(*) as c FROM commerce_entitlements WHERE status = 'active'").c;
+
+        const embed = new EmbedBuilder()
+            .setColor('#00AAFF')
+            .setTitle('📈 Estatísticas Comerciais')
+            .setDescription(
+                Object.entries(counts).map(([status, c]) => `\`${status}\`: ${c}`).join('\n') +
+                `\n\n**Faturamento aprovado este mês:** ${formatMoney(monthRevenue)}\n` +
+                `**Entitlements ativos:** ${activeEntitlements}`
+            );
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (customId === 'commerce_admin_audit') {
+        if (!hasPermission(interaction.user.id, 'admin')) return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        const recent = query("SELECT * FROM audit_log WHERE action LIKE 'commerce:%' ORDER BY id DESC LIMIT 15");
+        const embed = new EmbedBuilder()
+            .setColor('#FFAA00')
+            .setTitle('🧾 Auditoria Comercial (últimos 15 eventos)')
+            .setDescription(recent.length ? recent.map((e) => `\`${e.created_at}\` **${e.action}**`).join('\n') : 'Nenhum evento registrado ainda.');
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    return true;
+}
+
+module.exports = { match, handle, publishStorefront, publishStaffPanel };

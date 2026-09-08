@@ -27,10 +27,11 @@ function makeUser() {
 }
 function makeProduct(overrides = {}) {
     counter += 1;
-    return ProductCatalog.saveProduct({
+    const product = ProductCatalog.saveProduct({
         id: `emtest-prod-${counter}`, name: 'Plano', price: 39.9,
         maxBots: 3, maxRam: 512, maxCpu: 40, ...overrides,
     });
+    return ProductCatalog.publishProduct(product.id);
 }
 /** Cria um pedido e o leva até PROVISIONING — ponto onde grant() pode ser chamado. */
 function makeOrderInProvisioning(userId, { productOverrides = {}, renewalOfEntitlementId = null } = {}) {

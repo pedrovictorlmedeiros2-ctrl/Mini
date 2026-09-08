@@ -331,7 +331,11 @@ function initDatabase() {
             billing_period TEXT NOT NULL DEFAULT 'monthly',
             role_to_add TEXT,
             role_to_remove TEXT,
-            status TEXT NOT NULL DEFAULT 'active',
+            -- Fase 3: draft (recém-criado, nunca visível ao cliente) →
+            -- published (visível na loja, comprável) → paused (some da
+            -- loja, pedidos já existentes nunca são afetados) → archived
+            -- (terminal, nunca reaparece). Ver ProductCatalog.js.
+            status TEXT NOT NULL DEFAULT 'draft',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -425,6 +429,55 @@ function initDatabase() {
         )
     `);
 
+    // COMPROVANTES (Fase 3) — 1:N com commerce_orders (histórico completo,
+    // nunca sobrescrito: um reenvio cria uma linha NOVA). `id` é um UUID
+    // opaco (gerado em ProofManager.js), não sequencial, pra reduzir
+    // correlação trivial. `storage_path` aponta pro arquivo CIFRADO em
+    // disco (fileCrypto.js, AES-256-GCM) — nunca texto puro, nunca a URL
+    // temporária do Discord. `status` reflete o veredito do MESMO
+    // reviewer humano que decide o Payment (nunca uma validação
+    // automática de conteúdo).
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS commerce_proofs (
+            id TEXT PRIMARY KEY,
+            order_id INTEGER NOT NULL,
+            storage_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            mime_type TEXT,
+            original_filename TEXT,
+            size_bytes INTEGER,
+            uploaded_by_user_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'submitted',
+            reviewed_by_admin_id TEXT,
+            review_reason TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES commerce_orders(id),
+            FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id),
+            FOREIGN KEY (reviewed_by_admin_id) REFERENCES users(id)
+        )
+    `);
+
+    // Estrutura de canais/categorias da loja comercial (Fase 3) — separada
+    // de `sales_config` (legado: category_id/admin_role_id são de UM
+    // canal de carrinho por vez). Uma linha só (id=1), preenchida pelo
+    // comando de setup (idempotente — nunca recria se já configurado).
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS commerce_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            guild_id TEXT,
+            public_category_id TEXT,
+            sales_panel_channel_id TEXT,
+            faq_channel_id TEXT,
+            staff_category_id TEXT,
+            staff_panel_channel_id TEXT,
+            orders_review_channel_id TEXT,
+            proofs_channel_id TEXT,
+            sales_log_channel_id TEXT,
+            staff_role_id TEXT
+        )
+    `);
+    db.prepare('INSERT OR IGNORE INTO commerce_config (id) VALUES (1)').run();
+
     // INDICES
     db.exec(`CREATE INDEX IF NOT EXISTS idx_bots_creator ON bots(creator_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_bots_code ON bots(code)`);
@@ -447,6 +500,8 @@ function initDatabase() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_orders_user_status ON commerce_orders(user_id, status)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_orders_status ON commerce_orders(status)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_entitlements_user_status ON commerce_entitlements(user_id, status)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_proofs_order ON commerce_proofs(order_id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_products_status ON commerce_products(status)`);
 
     // CORREÇÃO (defesa em profundidade — race condition de porta): garante no
     // nível do banco que duas linhas nunca tenham a mesma porta não-nula, mesmo

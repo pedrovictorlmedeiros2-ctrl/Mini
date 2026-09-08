@@ -6,8 +6,9 @@ const affiliate = require('./affiliate');
 const admin = require('./admin');
 const bots = require('./bots');
 const files = require('./files');
+const commerce = require('./commerce');
 
-const domains = [affiliate, sales, admin, bots, files];
+const domains = [affiliate, sales, admin, bots, files, commerce];
 
 async function routeDomain(interaction, helpers = {}) {
     const customId = interaction.customId;

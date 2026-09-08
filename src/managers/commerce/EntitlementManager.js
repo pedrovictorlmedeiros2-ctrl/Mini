@@ -38,7 +38,6 @@
  */
 const { get, run, query } = require('../../database/database');
 const { recordAuditEvent } = require('../auditManager');
-const config = require('../../../config');
 const OrderManager = require('./OrderManager');
 
 const ENTITLEMENT_STATUS = Object.freeze({
@@ -180,41 +179,21 @@ function grant(orderId) {
 }
 
 /**
- * Recalcula a capacidade efetiva do usuário (users.max_bots/max_ram/
- * max_cpu) a partir do entitlement ativo (no máximo 1, v1). Sem
- * entitlement ativo, volta pro default/free configurado (mesmo default
- * já usado em todo o resto da plataforma — config.security.*).
+ * Recalcula a capacidade efetiva do usuário. Delegado inteiramente a
+ * `capacityManager.js` (fonte única de verdade — ver o comentário
+ * normativo naquele arquivo sobre a precedência entre Entitlement e o
+ * `plan_id` do sistema legado). Este módulo nunca escreve em
+ * `users.max_bots/max_ram/max_cpu` diretamente — só aciona o
+ * recálculo depois de qualquer mudança no próprio Entitlement.
  *
- * Mesmo teto de segurança do host já usado no fluxo legado
- * (`activateUserPlan`) — nunca deixa um produto conceder mais do que o
- * host aguenta, mesmo que o produto diga um valor maior.
+ * Lazy require: `capacityManager.js` também precisa ler
+ * `getActiveEntitlement` deste módulo — top-level nos dois lados criaria
+ * um ciclo. Mesmo padrão já usado no projeto (SecurityEngine ↔
+ * IncidentResponseManager).
  */
 function recomputeUserCapacity(userId) {
-    const active = getActiveEntitlement(userId);
-
-    if (!active) {
-        run(
-            "UPDATE users SET max_bots = ?, max_ram = ?, max_cpu = ?, updated_at = datetime('now') WHERE id = ?",
-            [config.security.maxBotsPerUser, config.security.maxRamPerBot, config.security.maxCpuPerBot, userId]
-        );
-        return;
-    }
-
-    const order = OrderManager.getOrder(active.order_id);
-    const snapshot = JSON.parse(order.product_snapshot);
-
-    const hostRamCap = Number(process.env.HOST_MAX_RAM_PER_BOT) || 512;
-    const hostCpuCap = Number(process.env.HOST_MAX_CPU_PER_BOT) || 50;
-    const hostBotsCap = Number(process.env.HOST_MAX_BOTS_PER_USER) || 10;
-
-    const safeRam = Math.min(Number(snapshot.maxRam) || 256, hostRamCap);
-    const safeCpu = Math.min(Number(snapshot.maxCpu) || 30, hostCpuCap);
-    const safeBots = Math.min(Number(snapshot.maxBots) || 1, hostBotsCap);
-
-    run(
-        "UPDATE users SET max_bots = ?, max_ram = ?, max_cpu = ?, updated_at = datetime('now') WHERE id = ?",
-        [safeBots, safeRam, safeCpu, userId]
-    );
+    const capacityManager = require('../capacityManager');
+    return capacityManager.recomputeUserCapacity(userId);
 }
 
 /** Expira um entitlement (chamado pelo CommerceScheduler quando expires_at já passou). */

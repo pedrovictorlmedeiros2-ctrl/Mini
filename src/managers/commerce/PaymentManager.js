@@ -23,6 +23,7 @@ const { recordAuditEvent } = require('../auditManager');
 const OrderManager = require('./OrderManager');
 const CommerceStaffManager = require('./CommerceStaffManager');
 const CouponManager = require('./CouponManager');
+const ProofManager = require('./ProofManager');
 
 const PAYMENT_STATUS = Object.freeze({
     AWAITING_PROOF: 'awaiting_proof',
@@ -117,6 +118,7 @@ function confirmPayment(orderId, reviewerUserId) {
         const { overLimit } = CouponManager.confirmUsage(order.coupon_id);
         if (overLimit) couponWarning = 'coupon_over_limit';
     }
+    ProofManager.markLatestProofStatus(orderId, 'accepted', reviewerUserId);
 
     recordAuditEvent({
         userId: reviewerUserId,
@@ -148,6 +150,7 @@ function rejectPayment(orderId, reviewerUserId, reason) {
         "UPDATE commerce_payments SET status = ?, confirmed_by_admin_id = ?, confirmed_at = datetime('now'), rejection_reason = ? WHERE order_id = ?",
         [PAYMENT_STATUS.REJECTED, reviewerUserId, reason, orderId]
     );
+    ProofManager.markLatestProofStatus(orderId, 'rejected', reviewerUserId, reason);
 
     recordAuditEvent({
         userId: reviewerUserId,

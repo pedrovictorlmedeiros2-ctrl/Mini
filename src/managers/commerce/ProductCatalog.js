@@ -1,10 +1,26 @@
 /**
- * PRODUCT CATALOG (Sistema Comercial — Fase 2)
+ * PRODUCT CATALOG (Sistema Comercial — Fase 2/3)
  *
  * CRUD do catálogo de produtos (planos mensais de capacidade de
  * hospedagem, v1) e o construtor do snapshot imutável usado por
  * OrderManager.confirmProduct(). Ver COMMERCIAL_ARCHITECTURE_PROPOSAL.md
  * §2/§6.
+ *
+ * Ciclo de vida do produto (Fase 3 — pedido explícito: criar/editar/
+ * publicar/pausar/arquivar):
+ *
+ *   DRAFT ──publish──► PUBLISHED ──pause──► PAUSED
+ *     │                    │                    │
+ *     └──────archive───────┴────────archive──────┘
+ *                           ▼
+ *                       ARCHIVED (terminal)
+ *
+ * Só produtos PUBLISHED aparecem pro cliente (getPublishedProducts()) e
+ * só produtos PUBLISHED podem ter um snapshot montado pra um pedido novo
+ * (buildProductSnapshot()) — DRAFT/PAUSED/ARCHIVED nunca são compráveis,
+ * cada um por um motivo diferente (ainda não pronto / temporariamente
+ * indisponível / removido definitivamente), mas o efeito de "não pode
+ * comprar agora" é o mesmo pros três.
  *
  * Nunca decide preço nem calcula desconto — isso é OrderManager +
  * CouponManager. Este módulo só sabe "o que é o produto agora".
@@ -12,7 +28,22 @@
 const { get, run, query } = require('../../database/database');
 const { recordAuditEvent } = require('../auditManager');
 
-const PRODUCT_STATUS = Object.freeze({ ACTIVE: 'active', ARCHIVED: 'archived' });
+const PRODUCT_STATUS = Object.freeze({
+    DRAFT: 'draft',
+    PUBLISHED: 'published',
+    PAUSED: 'paused',
+    ARCHIVED: 'archived',
+});
+
+// Única fonte de verdade da máquina de estados do produto — mesmo
+// princípio de OrderManager.VALID_TRANSITIONS.
+const VALID_PRODUCT_TRANSITIONS = Object.freeze({
+    [PRODUCT_STATUS.DRAFT]: [PRODUCT_STATUS.PUBLISHED, PRODUCT_STATUS.ARCHIVED],
+    [PRODUCT_STATUS.PUBLISHED]: [PRODUCT_STATUS.PAUSED, PRODUCT_STATUS.ARCHIVED],
+    [PRODUCT_STATUS.PAUSED]: [PRODUCT_STATUS.PUBLISHED, PRODUCT_STATUS.ARCHIVED],
+    [PRODUCT_STATUS.ARCHIVED]: [],
+});
+
 const VALID_BILLING_PERIODS = new Set(['monthly']); // v1: só mensal (decisão #3)
 
 /**
@@ -21,6 +52,11 @@ const VALID_BILLING_PERIODS = new Set(['monthly']); // v1: só mensal (decisão 
  * antigos continuam referenciando product_id pra fins de exibição
  * administrativa (o snapshot em si nunca depende disso continuar
  * existindo).
+ *
+ * Um produto NOVO sempre nasce DRAFT — nunca visível ao cliente até uma
+ * chamada explícita a publishProduct(). Editar um produto já existente
+ * (mesmo `id`) preserva o status atual (editar não republica nem
+ * despublica sozinho).
  */
 function saveProduct(productData) {
     const {
@@ -31,7 +67,6 @@ function saveProduct(productData) {
         billingPeriod = 'monthly',
         roleToAdd = null,
         roleToRemove = null,
-        status = PRODUCT_STATUS.ACTIVE,
     } = productData;
 
     if (!id || !name) {
@@ -44,7 +79,11 @@ function saveProduct(productData) {
         throw new Error(`billingPeriod inválido: "${billingPeriod}". Válidos na v1: ${[...VALID_BILLING_PERIODS].join(', ')}.`);
     }
 
-    const isNew = !get('SELECT id FROM commerce_products WHERE id = ?', [id]);
+    const existing = getProduct(id);
+    const isNew = !existing;
+    // Editar preserva o status atual — nunca republica/despublica como
+    // efeito colateral de uma edição de preço/descrição.
+    const status = existing ? existing.status : PRODUCT_STATUS.DRAFT;
 
     run(`
         INSERT INTO commerce_products (id, guild_id, name, description, price, max_bots, max_ram, max_cpu, storage, billing_period, role_to_add, role_to_remove, status)
@@ -54,7 +93,7 @@ function saveProduct(productData) {
             price=excluded.price, max_bots=excluded.max_bots, max_ram=excluded.max_ram,
             max_cpu=excluded.max_cpu, storage=excluded.storage, billing_period=excluded.billing_period,
             role_to_add=excluded.role_to_add, role_to_remove=excluded.role_to_remove,
-            status=excluded.status, updated_at=datetime('now')
+            updated_at=datetime('now')
     `, [id, guildId, name, description, price, maxBots, maxRam, maxCpu, storage, billingPeriod, roleToAdd, roleToRemove, status]);
 
     recordAuditEvent({
@@ -71,30 +110,50 @@ function getProduct(productId) {
     return get('SELECT * FROM commerce_products WHERE id = ?', [productId]);
 }
 
-function getAllProducts(onlyActive = true) {
-    if (onlyActive) {
-        return query("SELECT * FROM commerce_products WHERE status = ? ORDER BY price ASC", [PRODUCT_STATUS.ACTIVE]);
-    }
+/** Todos os produtos (qualquer status) — uso administrativo. */
+function getAllProducts() {
     return query('SELECT * FROM commerce_products ORDER BY price ASC');
 }
 
-/**
- * "Remove" um produto do catálogo sem apagar a linha — pedidos antigos
- * (via product_snapshot, nunca via este product_id ao vivo) continuam
- * intactos. Um produto arquivado nunca aparece em getAllProducts(true)
- * nem pode ser usado em confirmProduct() de um pedido novo.
- */
-function archiveProduct(productId) {
+/** SÓ produtos PUBLISHED — o único conjunto que a loja pública do cliente pode mostrar. */
+function getPublishedProducts() {
+    return query('SELECT * FROM commerce_products WHERE status = ? ORDER BY price ASC', [PRODUCT_STATUS.PUBLISHED]);
+}
+
+function transitionProductStatus(productId, fromStatuses, toStatus, auditEvent) {
     const product = getProduct(productId);
     if (!product) throw new Error(`Produto não encontrado: ${productId}`);
-    run("UPDATE commerce_products SET status = ?, updated_at = datetime('now') WHERE id = ?", [PRODUCT_STATUS.ARCHIVED, productId]);
-    recordAuditEvent({
-        userId: null,
-        event: 'commerce:product_archived',
-        details: JSON.stringify({ productId }),
-        severity: 'info',
-    });
+    if (!fromStatuses.includes(product.status)) {
+        throw new Error(`Produto "${productId}" está "${product.status}" — não é possível ${auditEvent.split(':')[1]} a partir daí.`);
+    }
+    run("UPDATE commerce_products SET status = ?, updated_at = datetime('now') WHERE id = ?", [toStatus, productId]);
+    recordAuditEvent({ userId: null, event: auditEvent, details: JSON.stringify({ productId }), severity: 'info' });
     return getProduct(productId);
+}
+
+/** Publica o produto — passa a aparecer na loja e a poder ser comprado. */
+function publishProduct(productId) {
+    return transitionProductStatus(productId, [PRODUCT_STATUS.DRAFT, PRODUCT_STATUS.PAUSED], PRODUCT_STATUS.PUBLISHED, 'commerce:product_published');
+}
+
+/** Pausa o produto — some da loja, mas NUNCA afeta pedidos/entitlements já existentes (que vivem só do snapshot). Pode ser republicado depois. */
+function pauseProduct(productId) {
+    return transitionProductStatus(productId, [PRODUCT_STATUS.PUBLISHED], PRODUCT_STATUS.PAUSED, 'commerce:product_paused');
+}
+
+/**
+ * "Remove" um produto do catálogo em definitivo — terminal, nunca
+ * republicável. Nunca apaga a linha — pedidos antigos (via
+ * product_snapshot, nunca via este product_id ao vivo) continuam
+ * intactos.
+ */
+function archiveProduct(productId) {
+    return transitionProductStatus(
+        productId,
+        [PRODUCT_STATUS.DRAFT, PRODUCT_STATUS.PUBLISHED, PRODUCT_STATUS.PAUSED],
+        PRODUCT_STATUS.ARCHIVED,
+        'commerce:product_archived'
+    );
 }
 
 /**
@@ -103,14 +162,15 @@ function archiveProduct(productId) {
  * relevantes (não só o preço) — uma vez gravado no pedido, nunca mais é
  * relido daqui (ver OrderManager.confirmProduct()).
  *
- * Lança se o produto não existir ou não estiver 'active' — nunca monta
- * um snapshot a partir de um produto arquivado (evita vender algo que o
- * catálogo já não oferece mais).
+ * Lança se o produto não existir ou não estiver PUBLISHED — nunca monta
+ * um snapshot a partir de um produto em rascunho, pausado ou arquivado
+ * (evita vender algo que a loja não está oferecendo agora, seja qual
+ * for o motivo).
  */
 function buildProductSnapshot(productId) {
     const product = getProduct(productId);
     if (!product) throw new Error(`Produto não encontrado: ${productId}`);
-    if (product.status !== PRODUCT_STATUS.ACTIVE) {
+    if (product.status !== PRODUCT_STATUS.PUBLISHED) {
         throw new Error(`Produto "${productId}" não está disponível para compra (status: ${product.status}).`);
     }
 
@@ -133,10 +193,14 @@ function buildProductSnapshot(productId) {
 
 module.exports = {
     PRODUCT_STATUS,
+    VALID_PRODUCT_TRANSITIONS,
     VALID_BILLING_PERIODS,
     saveProduct,
     getProduct,
     getAllProducts,
+    getPublishedProducts,
+    publishProduct,
+    pauseProduct,
     archiveProduct,
     buildProductSnapshot,
 };
