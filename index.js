@@ -100,6 +100,7 @@ const { startWorkerAgent, stopWorkerAgent } = require('./src/managers/workerAgen
 const { startFailoverScheduler, stopFailoverScheduler } = require('./src/managers/failoverManager');
 const { reconcileStuckIncidents } = require('./src/managers/security/IncidentResponseManager');
 const { computeReadiness, startReadinessMonitor, getReadinessState, STATUS: READINESS_STATUS } = require('./src/managers/serviceReadiness');
+const { startSecurityMonitor } = require('./src/managers/security/monitor/SecurityMonitor');
 
 // ── INICIALIZAÇÃO DO BANCO DE DADOS, CONSOLE E MONITORAMENTO ──────────────────
 initDatabase();
@@ -136,6 +137,15 @@ computeReadiness()
     .catch((err) => {
         console.error('[Readiness] Falha ao calcular o estado inicial — permanece BLOCKED por segurança:', err.message);
     });
+
+// SECURITY MONITOR (Fase 2): observa o audit_log de todos os bots e envia
+// metadados redigidos/allowlisted pro Groq como analisador auxiliar — nunca
+// decide nada sozinho (ver ThreatDecisionPolicy.js), nunca bloqueia o boot
+// nem o event loop principal (timer próprio, cada análise por bot vai pra
+// fila assíncrona de baixa prioridade). Se GROQ_API_KEY não estiver
+// configurada, roda mas nunca tenta rede — o Kamikaze determinístico
+// continua idêntico com ou sem isto.
+startSecurityMonitor();
 
 initConsole();
 startScheduler();

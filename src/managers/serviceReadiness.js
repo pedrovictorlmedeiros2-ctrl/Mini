@@ -132,6 +132,31 @@ async function computeReadiness() {
         degradedReasons.push(`Não foi possível checar a disponibilidade do Docker: ${err.message}`);
     }
 
+    // ── Groq (analisador auxiliar, Fase 2) indisponível por muito tempo ──
+    // NUNCA bloqueia hospedagem — é só um sinal operacional pro admin. Só
+    // conta como degradação se o operador OPTOU por ligar o Groq (habilitado
+    // + GROQ_API_KEY configurada) e mesmo assim as últimas chamadas
+    // operacionais estão falhando em sequência (ver SecurityMonitor.js —
+    // "desabilitado"/"sem chave" nunca incrementam esse contador). O
+    // Kamikaze determinístico (SecurityEngine/IncidentResponseManager)
+    // continua funcionando de forma idêntica independente disto.
+    try {
+        const { getGroqMonitorHealth } = require('./security/monitor/SecurityMonitor');
+        const cfg = config.security.groqMonitor;
+        if (cfg.enabled && process.env.GROQ_API_KEY) {
+            const health = getGroqMonitorHealth();
+            if (health.consecutiveUnavailable >= cfg.degradedAfterConsecutiveFailures) {
+                degradedReasons.push(
+                    `Analisador auxiliar Groq indisponível nas últimas ${health.consecutiveUnavailable} tentativas operacionais ` +
+                    `seguidas (último sucesso: ${health.lastAvailableAt || 'nunca'}) — o Kamikaze determinístico continua ` +
+                    `funcionando normalmente, só a sugestão auxiliar do Groq está fora do ar.`
+                );
+            }
+        }
+    } catch (err) {
+        degradedReasons.push(`Não foi possível checar a saúde do SecurityMonitor/Groq: ${err.message}`);
+    }
+
     let status = STATUS.READY;
     if (blockedReasons.length) status = STATUS.BLOCKED;
     else if (degradedReasons.length) status = STATUS.DEGRADED;

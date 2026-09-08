@@ -83,6 +83,13 @@ module.exports = {
             // SecurityEngine como um sinal SUSPICIOUS/HIGH — abaixo disso,
             // fica só registrado no audit_log, sem nenhuma ação.
             minConfidenceToForwardSignal: parseFloat(process.env.GROQ_MONITOR_MIN_CONFIDENCE) || 0.6,
+            // Quantas chamadas OPERACIONAIS seguidas (Groq habilitado E com
+            // GROQ_API_KEY configurada — nunca conta "desabilitado"/"sem
+            // chave" como falha) precisam falhar em sequência antes do
+            // serviceReadiness.js reportar DEGRADED por indisponibilidade
+            // prolongada do Groq. Nunca vira BLOCKED — o Groq é só um
+            // analisador auxiliar, hospedagem continua normal sem ele.
+            degradedAfterConsecutiveFailures: parseInt(process.env.GROQ_MONITOR_DEGRADED_AFTER_FAILURES) || 5,
         },
     },
 
