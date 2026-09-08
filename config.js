@@ -61,6 +61,29 @@ module.exports = {
             // purga manual/automática (não construída nesta entrega).
             quarantineRetentionDays: parseInt(process.env.KAMIKAZE_QUARANTINE_RETENTION_DAYS) || 30,
         },
+
+        // ─── SECURITY MONITOR + GROQ (analisador auxiliar, Fase 2) ───
+        // O Groq NUNCA decide CRITICAL sozinho — só enriquece sinais que já
+        // passam pelas regras determinísticas do SecurityEngine (ver
+        // ThreatDecisionPolicy.js). Se ficar indisponível, o Kamikaze
+        // determinístico continua funcionando exatamente igual.
+        groqMonitor: {
+            // Precisa de GROQ_API_KEY definida MESMO com isto true — sem a
+            // chave, o monitor roda mas o GroqThreatAnalyzer nunca tenta
+            // rede nenhuma (retorna indisponível na hora).
+            enabled: process.env.GROQ_MONITOR_ENABLED !== 'false',
+            pollIntervalMs: parseInt(process.env.GROQ_MONITOR_POLL_INTERVAL_MS) || 30000,
+            requestTimeoutMs: parseInt(process.env.GROQ_MONITOR_TIMEOUT_MS) || 5000,
+            // Retries ADICIONAIS além da primeira tentativa (1 = 2 tentativas no total).
+            maxRetries: parseInt(process.env.GROQ_MONITOR_MAX_RETRIES) || 1,
+            rateLimitPerMinute: parseInt(process.env.GROQ_MONITOR_RATE_LIMIT_PER_MIN) || 20,
+            circuitBreakerFailureThreshold: parseInt(process.env.GROQ_MONITOR_CIRCUIT_THRESHOLD) || 5,
+            circuitBreakerCooldownMs: parseInt(process.env.GROQ_MONITOR_CIRCUIT_COOLDOWN_MS) || 2 * 60 * 1000,
+            // Confiança mínima da resposta do Groq pra sequer alimentar o
+            // SecurityEngine como um sinal SUSPICIOUS/HIGH — abaixo disso,
+            // fica só registrado no audit_log, sem nenhuma ação.
+            minConfidenceToForwardSignal: parseFloat(process.env.GROQ_MONITOR_MIN_CONFIDENCE) || 0.6,
+        },
     },
 
     // ─── RECURSOS DO SISTEMA ───
