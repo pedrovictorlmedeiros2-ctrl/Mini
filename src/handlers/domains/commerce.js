@@ -43,6 +43,7 @@ const EXACT = [
 ];
 const PREFIXES = [
     'commerce_staff_view_proof_', 'commerce_staff_approve_', 'commerce_staff_reject_', 'modal_commerce_staff_reject_',
+    'commerce_staff_request_new_proof_', 'modal_commerce_staff_request_new_proof_',
     'commerce_admin_publish_product_', 'commerce_admin_pause_product_', 'commerce_admin_archive_product_',
 ];
 
@@ -454,18 +455,29 @@ async function handle(interaction, helpers = {}) {
 
         const snapshot = order.product_snapshot ? JSON.parse(order.product_snapshot) : null;
         const buyer = get('SELECT username FROM users WHERE id = ?', [order.user_id]);
+        // Histórico relevante (Fase 6): quantos comprovantes esse pedido já
+        // recebeu no total — cada reenvio (inclusive depois de um "Solicitar
+        // Novo Comprovante") preserva a linha anterior, nunca some.
+        const proofHistory = ProofManager.listProofsForOrder(order.id);
+        const priceLine = order.discount_amount > 0
+            ? `**Valor:** \`${formatMoney(order.original_price)}\` → \`${formatMoney(order.total_price)}\` (desconto de \`${formatMoney(order.discount_amount)}\`)`
+            : `**Valor:** \`${formatMoney(order.total_price)}\``;
         const embed = new EmbedBuilder()
             .setColor('#FFFF00')
             .setTitle(`🧐 Pedido #${order.id}`)
             .setDescription(
                 `**Cliente:** \`${buyer?.username || order.user_id}\` (<@${order.user_id}>)\n` +
                 `**Plano:** \`${snapshot?.name || '—'}\`\n` +
-                `**Valor Total:** \`${formatMoney(order.total_price)}\`\n` +
-                `**Status:** \`${order.status}\``
+                `${priceLine}\n` +
+                `**Criado em:** \`${order.created_at}\`\n` +
+                `**Status:** \`${order.status}\`\n` +
+                `**Comprovantes enviados:** \`${proofHistory.length}\`` +
+                (order.rejection_reason ? `\n**Última observação do staff:** ${order.rejection_reason}` : '')
             );
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`commerce_staff_view_proof_${order.id}`).setLabel('Ver Comprovante').setEmoji('🔍').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId(`commerce_staff_approve_${order.id}`).setLabel('Aprovar').setEmoji('✅').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`commerce_staff_request_new_proof_${order.id}`).setLabel('Pedir Novo Comprovante').setEmoji('🔁').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId(`commerce_staff_reject_${order.id}`).setLabel('Recusar').setEmoji('❌').setStyle(ButtonStyle.Danger)
         );
         return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
@@ -567,6 +579,58 @@ async function handle(interaction, helpers = {}) {
             setTimeout(() => channel.delete().catch(() => {}), 10000);
         }
         return interaction.reply({ content: `❌ Pedido #${order.id} recusado.`, ephemeral: true });
+    }
+
+    if (customId.startsWith('commerce_staff_request_new_proof_')) {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const orderId = customId.replace('commerce_staff_request_new_proof_', '');
+        const modal = new ModalBuilder()
+            .setCustomId(`modal_commerce_staff_request_new_proof_${orderId}`)
+            .setTitle('🔁 Pedir Novo Comprovante')
+            .addComponents(new ActionRowBuilder().addComponents(
+                new TextInputBuilder().setCustomId('reason').setLabel('O que está errado com o comprovante atual?').setStyle(TextInputStyle.Paragraph)
+                    .setPlaceholder('Ex: Comprovante ilegível, valor não confere, precisa enviar de novo.').setRequired(true)
+            ));
+        return interaction.showModal(modal);
+    }
+
+    if (customId.startsWith('modal_commerce_staff_request_new_proof_')) {
+        if (!CommerceStaffManager.hasCommercePermission(interaction.user.id)) {
+            return interaction.reply({ content: '❌ Acesso negado.', ephemeral: true });
+        }
+        const orderId = Number(customId.replace('modal_commerce_staff_request_new_proof_', ''));
+        const reason = interaction.fields.getTextInputValue('reason');
+
+        // NUNCA rejeição definitiva: UNDER_REVIEW -> NEEDS_NEW_PROOF — o
+        // pedido continua vivo, o Payment continua AWAITING_PROOF (nenhuma
+        // decisão financeira foi tomada), só se pediu uma evidência melhor.
+        let order;
+        try {
+            order = PaymentManager.requestNewProof(orderId, interaction.user.id, reason);
+        } catch (err) {
+            return interaction.reply({ content: `⚠️ ${err.message}`, ephemeral: true });
+        }
+
+        const cfg = CommerceConfig.getConfig();
+        await postToChannel(interaction.guild, cfg?.sales_log_channel_id, { content: `🔁 Pedido #${order.id}: novo comprovante solicitado por <@${interaction.user.id}> — motivo: ${reason}` });
+
+        const channel = interaction.guild.channels.cache.get(order.channel_id);
+        if (channel) {
+            const embed = new EmbedBuilder()
+                .setColor('#FFAA00')
+                .setTitle('🔁 Precisamos de um novo comprovante')
+                .setDescription(`**Motivo:** ${reason}\n\nClique no botão abaixo e envie um comprovante novo.`);
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('commerce_send_proof').setLabel('Enviar Comprovante').setEmoji('📎').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId('commerce_cancel_order').setLabel('Cancelar Pedido').setEmoji('❌').setStyle(ButtonStyle.Danger)
+            );
+            await channel.send({ content: `<@${order.user_id}>`, embeds: [embed], components: [row] });
+        }
+        await notifyBuyer(interaction.client, order.user_id, `🔁 **Precisamos de um novo comprovante** pro seu pedido #${order.id}.\n**Motivo:** ${reason}\nAcesse o canal do seu pedido pra enviar.`);
+
+        return interaction.reply({ content: `🔁 Pedido #${order.id}: novo comprovante solicitado ao cliente.`, ephemeral: true });
     }
 
     // ═══════════════════════════════════════════════════════════════════

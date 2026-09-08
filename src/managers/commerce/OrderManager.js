@@ -28,6 +28,12 @@ const STATUS = Object.freeze({
     AWAITING_PAYMENT: 'AWAITING_PAYMENT',
     PROOF_SUBMITTED: 'PROOF_SUBMITTED',
     UNDER_REVIEW: 'UNDER_REVIEW',
+    // Fase 6 — rejeição "leve": o comprovante enviado não serve (ilegível,
+    // valor não bate etc.) mas o pedido em si não foi recusado em
+    // definitivo. Distinto de REJECTED (terminal, sem volta) — aqui o
+    // cliente pode enviar um novo comprovante e o pedido volta pra
+    // revisão. Ver ProofManager.submitProof() e PaymentManager.requestNewProof().
+    NEEDS_NEW_PROOF: 'NEEDS_NEW_PROOF',
     APPROVED: 'APPROVED',
     PROVISIONING: 'PROVISIONING',
     ACTIVE: 'ACTIVE',
@@ -43,7 +49,11 @@ const VALID_TRANSITIONS = Object.freeze({
     [STATUS.DRAFT]: [STATUS.AWAITING_PAYMENT, STATUS.CANCELLED],
     [STATUS.AWAITING_PAYMENT]: [STATUS.PROOF_SUBMITTED, STATUS.CANCELLED, STATUS.EXPIRED],
     [STATUS.PROOF_SUBMITTED]: [STATUS.UNDER_REVIEW, STATUS.CANCELLED],
-    [STATUS.UNDER_REVIEW]: [STATUS.PROOF_SUBMITTED, STATUS.APPROVED, STATUS.REJECTED],
+    [STATUS.UNDER_REVIEW]: [STATUS.PROOF_SUBMITTED, STATUS.NEEDS_NEW_PROOF, STATUS.APPROVED, STATUS.REJECTED],
+    // Volta pra UNDER_REVIEW assim que o cliente reenvia (ProofManager) —
+    // ou o cliente desiste e cancela, mesma janela que já valia em
+    // PROOF_SUBMITTED (ainda não é uma decisão final do staff).
+    [STATUS.NEEDS_NEW_PROOF]: [STATUS.UNDER_REVIEW, STATUS.CANCELLED],
     [STATUS.APPROVED]: [STATUS.PROVISIONING],
     [STATUS.PROVISIONING]: [STATUS.ACTIVE, STATUS.PROVISIONING_FAILED],
     [STATUS.PROVISIONING_FAILED]: [STATUS.PROVISIONING],
@@ -229,7 +239,7 @@ function removeCoupon(orderId) {
 function cancelOrder(orderId) {
     const order = transitionOrder(
         orderId,
-        [STATUS.DRAFT, STATUS.AWAITING_PAYMENT, STATUS.PROOF_SUBMITTED],
+        [STATUS.DRAFT, STATUS.AWAITING_PAYMENT, STATUS.PROOF_SUBMITTED, STATUS.NEEDS_NEW_PROOF],
         STATUS.CANCELLED
     );
     if (!order) {

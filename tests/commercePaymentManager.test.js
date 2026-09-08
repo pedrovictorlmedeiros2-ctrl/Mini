@@ -37,6 +37,17 @@ function makeOrderReadyForReview(userId, priceOverride) {
     OrderManager.confirmProduct(order.id, product.id);
     PaymentManager.createPaymentRecord(order.id);
     OrderManager.transitionOrder(order.id, [OrderManager.STATUS.AWAITING_PAYMENT], OrderManager.STATUS.PROOF_SUBMITTED);
+    // Fase 6: confirmPayment/rejectPayment/requestNewProof agora exigem
+    // pelo menos um comprovante registrado (defesa em profundidade contra
+    // "aprovar sem comprovante válido"). Este arquivo testa PaymentManager
+    // isolado de ProofManager de propósito — insere só a LINHA mínima
+    // necessária pra satisfazer essa checagem, sem passar pelo pipeline
+    // completo de upload (que tem seus próprios testes dedicados).
+    run(
+        `INSERT INTO commerce_proofs (id, order_id, storage_path, sha256, mime_type, original_filename, size_bytes, uploaded_by_user_id, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [`pmtest-proof-${counter}`, order.id, '/tmp/fake-proof.enc', 'fakehash', 'image/png', 'comprovante.png', 100, userId, 'submitted']
+    );
     return OrderManager.getOrder(order.id);
 }
 

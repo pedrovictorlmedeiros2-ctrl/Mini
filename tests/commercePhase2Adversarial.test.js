@@ -40,6 +40,19 @@ function makeProduct(overrides = {}) {
     const product = ProductCatalog.saveProduct({ id: `advcomm-prod-${counter}`, name: 'Plano', price: 49.9, maxBots: 2, maxRam: 512, maxCpu: 40, ...overrides });
     return ProductCatalog.publishProduct(product.id); // Fase 3: precisa estar PUBLISHED pra ser comprável
 }
+// Fase 6: confirmPayment/rejectPayment/requestNewProof exigem pelo menos
+// um comprovante registrado. Este arquivo testa PaymentManager/OrderManager
+// isolados de ProofManager de propósito — insere só a LINHA mínima
+// necessária, sem passar pelo pipeline completo de upload (testado à
+// parte em commerceProofManager.test.js/commercePhase5Adversarial.test.js).
+function insertFakeProof(orderId, uploaderUserId) {
+    counter += 1;
+    run(
+        `INSERT INTO commerce_proofs (id, order_id, storage_path, sha256, mime_type, original_filename, size_bytes, uploaded_by_user_id, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [`advcomm-proof-${counter}`, orderId, '/tmp/fake-proof.enc', 'fakehash', 'image/png', 'comprovante.png', 100, uploaderUserId, 'submitted']
+    );
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // 1) ISOLAMENTO ESTRUTURAL — nunca importa sandbox/segurança/spawn
@@ -118,6 +131,7 @@ test('FUNCIONAL: aplicar e confirmar um cupom nunca grava nada em commerce_payme
     OrderManager.applyCoupon(order.id, couponId, 20);
     PaymentManager.createPaymentRecord(order.id);
     OrderManager.transitionOrder(order.id, [OrderManager.STATUS.AWAITING_PAYMENT], OrderManager.STATUS.PROOF_SUBMITTED);
+    insertFakeProof(order.id, client);
     PaymentManager.openForReview(order.id, admin);
     PaymentManager.confirmPayment(order.id, admin);
 
@@ -171,6 +185,7 @@ test('INVARIANTE: confirmPayment() jamais, sob nenhuma circunstância, chega a c
     OrderManager.confirmProduct(order.id, product.id);
     PaymentManager.createPaymentRecord(order.id);
     OrderManager.transitionOrder(order.id, [OrderManager.STATUS.AWAITING_PAYMENT], OrderManager.STATUS.PROOF_SUBMITTED);
+    insertFakeProof(order.id, client);
     PaymentManager.openForReview(order.id, admin);
 
     PaymentManager.confirmPayment(order.id, admin);
@@ -188,14 +203,23 @@ test('ESTRUTURAL: PaymentManager.js nunca importa EntitlementManager (não tem c
 // 6) hasCommercePermission SEMPRE CHECADA DENTRO DO MANAGER
 // ────────────────────────────────────────────────────────────────────────
 
-test('ESTRUTURAL: toda ação sensível de PaymentManager (openForReview/confirmPayment/rejectPayment) chama hasCommercePermission internamente', () => {
+test('ESTRUTURAL: toda ação sensível de PaymentManager (openForReview/confirmPayment/rejectPayment/requestNewProof) chama hasCommercePermission internamente (direto ou via assertCanReview)', () => {
     const src = fs.readFileSync(path.join(COMMERCE_DIR, 'PaymentManager.js'), 'utf8');
+    // Fase 6: confirmPayment/rejectPayment/requestNewProof passaram a
+    // compartilhar a checagem via um helper (assertCanReview) — confirma
+    // que o HELPER em si realmente checa hasCommercePermission...
+    const assertCanReviewBody = src.split('function assertCanReview')[1]?.split(/\nfunction /)[0];
+    assert.ok(assertCanReviewBody && assertCanReviewBody.includes('hasCommercePermission'), 'assertCanReview deveria checar hasCommercePermission internamente');
+
+    // ...e que cada função sensível de fato CHAMA esse helper (ou checa
+    // direto, como openForReview ainda faz).
     const functions = src.split(/^function /m).slice(1);
-    const sensitiveNames = ['openForReview', 'confirmPayment', 'rejectPayment'];
+    const sensitiveNames = ['openForReview', 'confirmPayment', 'rejectPayment', 'requestNewProof'];
     for (const fnBody of functions) {
         const name = fnBody.split('(')[0].trim();
         if (sensitiveNames.includes(name)) {
-            assert.ok(fnBody.includes('hasCommercePermission'), `${name} deveria checar hasCommercePermission internamente`);
+            const checksPermission = fnBody.includes('hasCommercePermission') || fnBody.includes('assertCanReview(');
+            assert.ok(checksPermission, `${name} deveria checar permissão comercial (direto ou via assertCanReview)`);
         }
     }
 });
@@ -303,6 +327,7 @@ test('PONTA A PONTA: dois pedidos aprovados em paralelo pro mesmo usuário — s
         OrderManager.confirmProduct(order.id, product.id);
         PaymentManager.createPaymentRecord(order.id);
         OrderManager.transitionOrder(order.id, [OrderManager.STATUS.AWAITING_PAYMENT], OrderManager.STATUS.PROOF_SUBMITTED);
+        insertFakeProof(order.id, client);
         PaymentManager.openForReview(order.id, admin);
         PaymentManager.confirmPayment(order.id, admin);
         OrderManager.transitionOrder(order.id, [OrderManager.STATUS.APPROVED], OrderManager.STATUS.PROVISIONING);

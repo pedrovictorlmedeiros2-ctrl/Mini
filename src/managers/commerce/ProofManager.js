@@ -106,6 +106,19 @@ function sanitizeFilename(rawName) {
     return safe || 'comprovante';
 }
 
+// Estados do PEDIDO em que um comprovante pode ser recebido (Fase 6:
+// inclui NEEDS_NEW_PROOF — o staff pediu um novo comprovante, o antigo
+// não serviu, mas o pedido não foi recusado em definitivo). REJECTED
+// NUNCA entra aqui de propósito — um pedido definitivamente recusado
+// nunca aceita um novo comprovante, isso não é uma transição válida na
+// máquina de estados (OrderManager.VALID_TRANSITIONS não tem
+// REJECTED → nada).
+const PROOF_ACCEPTING_STATUSES = [
+    OrderManager.STATUS.AWAITING_PAYMENT,
+    OrderManager.STATUS.PROOF_SUBMITTED,
+    OrderManager.STATUS.NEEDS_NEW_PROOF,
+];
+
 function getProof(proofId) {
     return get('SELECT * FROM commerce_proofs WHERE id = ?', [proofId]);
 }
@@ -154,7 +167,7 @@ async function submitProof(orderId, uploaderUserId, attachment) {
         throw new Error('Você não é o dono deste pedido — não é possível enviar um comprovante para ele.');
     }
 
-    if (![OrderManager.STATUS.AWAITING_PAYMENT, OrderManager.STATUS.PROOF_SUBMITTED].includes(order.status)) {
+    if (!PROOF_ACCEPTING_STATUSES.includes(order.status)) {
         throw new Error(`Pedido #${orderId} não está aceitando comprovante agora (status: ${order.status}).`);
     }
 
@@ -247,7 +260,7 @@ async function submitProof(orderId, uploaderUserId, attachment) {
     // driver SQLite é síncrono). O lock em memória da camada de UI
     // (commerce.js) é só uma otimização pra UX — esta é a garantia real.
     const freshOrder = OrderManager.getOrder(orderId);
-    if (!freshOrder || ![OrderManager.STATUS.AWAITING_PAYMENT, OrderManager.STATUS.PROOF_SUBMITTED].includes(freshOrder.status)) {
+    if (!freshOrder || !PROOF_ACCEPTING_STATUSES.includes(freshOrder.status)) {
         recordAuditEvent({
             userId: uploaderUserId,
             event: 'commerce:proof_rejected_stale_state',
@@ -285,6 +298,14 @@ async function submitProof(orderId, uploaderUserId, attachment) {
 
     if (freshOrder.status === OrderManager.STATUS.AWAITING_PAYMENT) {
         OrderManager.transitionOrder(orderId, [OrderManager.STATUS.AWAITING_PAYMENT], OrderManager.STATUS.PROOF_SUBMITTED);
+    } else if (freshOrder.status === OrderManager.STATUS.NEEDS_NEW_PROOF) {
+        // Reenvio depois de o staff pedir um novo comprovante (Fase 6) —
+        // volta DIRETO pra UNDER_REVIEW (o pedido já tinha sido aberto
+        // pra revisão antes; um novo comprovante só substitui o motivo
+        // de estar esperando, não reabre a fila de "aguardando triagem").
+        // O comprovante anterior nunca é apagado — só uma linha nova é
+        // inserida (ver histórico preservado acima).
+        OrderManager.transitionOrder(orderId, [OrderManager.STATUS.NEEDS_NEW_PROOF], OrderManager.STATUS.UNDER_REVIEW);
     }
 
     recordAuditEvent({

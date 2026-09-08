@@ -92,26 +92,74 @@ function openForReview(orderId, reviewerUserId) {
 }
 
 /**
+ * Guardas comuns a confirmPayment/rejectPayment/requestNewProof (Fase 6):
+ * - permissão comercial real (dentro do manager, nunca só na UI);
+ * - segregação de função — quem revisa nunca pode ser o próprio
+ *   comprador do pedido, mesmo que também tenha permissão comercial
+ *   (evita autoaprovação/autorrecusa);
+ * - precisa existir pelo menos um comprovante enviado — defesa em
+ *   profundidade contra "aprovar sem comprovante válido" (a máquina de
+ *   estados já torna isso estruturalmente impossível — não dá pra
+ *   chegar em UNDER_REVIEW sem passar por um `submitProof()` bem
+ *   sucedido —, mas revalidado aqui mesmo assim).
+ */
+function assertCanReview(orderId, reviewerUserId, actionLabel) {
+    if (!CommerceStaffManager.hasCommercePermission(reviewerUserId)) {
+        throw new Error(`Usuário sem permissão comercial (admin ou COMMERCE_STAFF) para ${actionLabel}.`);
+    }
+    const order = OrderManager.getOrder(orderId);
+    if (!order) {
+        throw new Error(`Pedido não encontrado: ${orderId}`);
+    }
+    if (order.user_id === reviewerUserId) {
+        throw new Error('Você não pode revisar (aprovar/recusar/solicitar novo comprovante) o seu próprio pedido.');
+    }
+    if (!ProofManager.getLatestProofForOrder(orderId)) {
+        throw new Error(`Pedido #${orderId} não tem nenhum comprovante enviado — não é possível ${actionLabel}.`);
+    }
+    return order;
+}
+
+/**
  * Confirma o pagamento — a ÚNICA coisa que este método faz do lado do
  * Order é levá-lo a APPROVED (nunca ACTIVE, nunca PROVISIONING — isso é
  * do ProvisioningManager, fase seguinte). Incrementa o uso do cupom
  * (se houver) SÓ agora — nunca no momento em que o cliente aplicou o
  * cupom (ver CouponManager.confirmUsage para o porquê).
+ *
+ * Duplo CAS persistente (Fase 6 — nunca reporta sucesso sobre uma
+ * operação que não bateu de verdade):
+ *   Gate 1 (Order): `transitionOrder` — já era CAS, preservado tal como
+ *   estava (mantém as mensagens/comportamento já testados desde a Fase 3
+ *   pra corrida entre dois cliques de "Aprovar").
+ *   Gate 2 (Payment): UPDATE explícito `WHERE status = AWAITING_PROOF`
+ *   com `changes` checado — sob operação normal isto SEMPRE bate, porque
+ *   Payment e Order só são movidos juntos por este módulo; chegar aqui
+ *   com zero linhas só é alcançável por uma inconsistência real de dados
+ *   (nunca uma corrida legítima, já filtrada pelo Gate 1), e por isso
+ *   vira um erro auditado como anomalia, nunca um "sucesso" silencioso.
  */
 function confirmPayment(orderId, reviewerUserId) {
-    if (!CommerceStaffManager.hasCommercePermission(reviewerUserId)) {
-        throw new Error('Usuário sem permissão comercial (admin ou COMMERCE_STAFF) para aprovar pagamentos.');
-    }
+    assertCanReview(orderId, reviewerUserId, 'aprovar pagamentos');
 
     const order = OrderManager.transitionOrder(orderId, [OrderManager.STATUS.UNDER_REVIEW], OrderManager.STATUS.APPROVED);
     if (!order) {
         throw new Error(`Pedido #${orderId} não está em revisão — não é possível aprovar (já processado ou fora de ordem).`);
     }
 
-    run(
-        "UPDATE commerce_payments SET status = ?, confirmed_by_admin_id = ?, confirmed_at = datetime('now') WHERE order_id = ?",
-        [PAYMENT_STATUS.CONFIRMED, reviewerUserId, orderId]
+    const paymentResult = run(
+        "UPDATE commerce_payments SET status = ?, confirmed_by_admin_id = ?, confirmed_at = datetime('now') WHERE order_id = ? AND status = ?",
+        [PAYMENT_STATUS.CONFIRMED, reviewerUserId, orderId, PAYMENT_STATUS.AWAITING_PROOF]
     );
+    if (!paymentResult || paymentResult.changes === 0) {
+        recordAuditEvent({
+            userId: reviewerUserId,
+            event: 'commerce:payment_confirm_inconsistency',
+            details: JSON.stringify({ orderId }),
+            severity: 'error',
+        });
+        throw new Error(`Pedido #${orderId}: o pagamento não pôde ser confirmado (inexistente ou já processado) — inconsistência detectada, aprovação abortada.`);
+    }
 
     let couponWarning = null;
     if (order.coupon_id) {
@@ -130,11 +178,9 @@ function confirmPayment(orderId, reviewerUserId) {
     return { order, couponWarning };
 }
 
-/** Recusa o pagamento — motivo obrigatório, sempre auditado. */
+/** Recusa o pagamento em DEFINITIVO — motivo obrigatório, sempre auditado. Terminal: sem novo comprovante depois disso (ver máquina de estados). */
 function rejectPayment(orderId, reviewerUserId, reason) {
-    if (!CommerceStaffManager.hasCommercePermission(reviewerUserId)) {
-        throw new Error('Usuário sem permissão comercial (admin ou COMMERCE_STAFF) para recusar pagamentos.');
-    }
+    assertCanReview(orderId, reviewerUserId, 'recusar pagamentos');
     if (!reason || !reason.trim()) {
         throw new Error('Motivo da recusa é obrigatório.');
     }
@@ -146,15 +192,57 @@ function rejectPayment(orderId, reviewerUserId, reason) {
         throw new Error(`Pedido #${orderId} não está em revisão — não é possível recusar (já processado ou fora de ordem).`);
     }
 
-    run(
-        "UPDATE commerce_payments SET status = ?, confirmed_by_admin_id = ?, confirmed_at = datetime('now'), rejection_reason = ? WHERE order_id = ?",
-        [PAYMENT_STATUS.REJECTED, reviewerUserId, reason, orderId]
+    const paymentResult = run(
+        "UPDATE commerce_payments SET status = ?, confirmed_by_admin_id = ?, confirmed_at = datetime('now'), rejection_reason = ? WHERE order_id = ? AND status = ?",
+        [PAYMENT_STATUS.REJECTED, reviewerUserId, reason, orderId, PAYMENT_STATUS.AWAITING_PROOF]
     );
+    if (!paymentResult || paymentResult.changes === 0) {
+        recordAuditEvent({
+            userId: reviewerUserId,
+            event: 'commerce:payment_reject_inconsistency',
+            details: JSON.stringify({ orderId }),
+            severity: 'error',
+        });
+        throw new Error(`Pedido #${orderId}: o pagamento não pôde ser recusado (inexistente ou já processado) — inconsistência detectada, recusa abortada.`);
+    }
     ProofManager.markLatestProofStatus(orderId, 'rejected', reviewerUserId, reason);
 
     recordAuditEvent({
         userId: reviewerUserId,
         event: 'commerce:payment_rejected',
+        details: JSON.stringify({ orderId, reason }),
+        severity: 'info',
+    });
+    return order;
+}
+
+/**
+ * Solicita um NOVO comprovante (Fase 6) — rejeição "leve": o comprovante
+ * atual não serve, mas o pedido não foi recusado em definitivo.
+ * `UNDER_REVIEW → NEEDS_NEW_PROOF`; o cliente pode reenviar via
+ * `ProofManager.submitProof()` (que trata NEEDS_NEW_PROOF como um estado
+ * aceito e volta o pedido pra UNDER_REVIEW sozinho). O Payment NUNCA é
+ * tocado aqui — continua `AWAITING_PROOF`, porque nenhuma decisão
+ * financeira foi tomada, só se pediu uma evidência melhor.
+ */
+function requestNewProof(orderId, reviewerUserId, reason) {
+    assertCanReview(orderId, reviewerUserId, 'solicitar novo comprovante');
+    if (!reason || !reason.trim()) {
+        throw new Error('Motivo é obrigatório para solicitar um novo comprovante.');
+    }
+
+    const order = OrderManager.transitionOrder(orderId, [OrderManager.STATUS.UNDER_REVIEW], OrderManager.STATUS.NEEDS_NEW_PROOF, {
+        rejection_reason: reason,
+    });
+    if (!order) {
+        throw new Error(`Pedido #${orderId} não está em revisão — não é possível solicitar novo comprovante (já processado ou fora de ordem).`);
+    }
+
+    ProofManager.markLatestProofStatus(orderId, 'needs_new_proof', reviewerUserId, reason);
+
+    recordAuditEvent({
+        userId: reviewerUserId,
+        event: 'commerce:proof_reupload_requested',
         details: JSON.stringify({ orderId, reason }),
         severity: 'info',
     });
@@ -168,4 +256,5 @@ module.exports = {
     openForReview,
     confirmPayment,
     rejectPayment,
+    requestNewProof,
 };
