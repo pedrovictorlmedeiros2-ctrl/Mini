@@ -376,6 +376,7 @@ function get(sql, params = []) {
 
 module.exports = {
     db,
+    dbPath,
     initDatabase,
     query,
     run,

@@ -68,7 +68,23 @@ if (!process.env.OWNER_ID || !/^\d{17,20}$/.test(process.env.OWNER_ID)) {
 
 const { Client, GatewayIntentBits, Collection, REST, Routes } = require('discord.js');
 const config = require('./config');
-const { initDatabase } = require('./src/database/database');
+const { initDatabase, dbPath } = require('./src/database/database');
+const { acquireInstanceLock, releaseInstanceLock } = require('./src/utils/instanceLock');
+
+// ── LOCK DE INSTÂNCIA ÚNICA ────────────────────────────────────────────────────
+// Precisa vir ANTES de qualquer coisa que mexa de verdade no banco/portas/
+// processos de bot — nunca queremos chegar a spawnar um bot hospedado com
+// duas instâncias competindo pelo mesmo banco. require('./src/database/database')
+// acima já abre o arquivo do SQLite como efeito colateral do módulo (não é
+// "trabalho de boot" ainda), mas tudo que syncStatusOnStartup()/initDatabase()
+// fazem depois é exatamente o que precisa de exclusividade.
+try {
+    acquireInstanceLock(dbPath);
+} catch (err) {
+    console.error(`❌ ${err.message}`);
+    process.exit(1);
+}
+
 const { handleInteraction } = require('./src/handlers/interactionHandler');
 const { stopBot, getOnlineBots, activeProcesses, syncStatusOnStartup } = require('./src/managers/processManager');
 const { startScheduler, stopScheduler } = require('./src/managers/schedulerManager');
@@ -260,6 +276,7 @@ async function gracefulShutdown(signal) {
     }
 
     client.destroy();
+    releaseInstanceLock(dbPath);
     console.log('👋 Bot encerrado com sucesso.');
     process.exit(0);
 }
