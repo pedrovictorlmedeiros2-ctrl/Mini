@@ -38,8 +38,9 @@
     "test:incidentResponseManager": "node --test tests/incidentResponseManager.test.js",
     "test:maintenanceManager": "node --test tests/maintenanceManager.test.js",
     "test:instanceLock": "node --test tests/instanceLock.test.js",
+    "test:serviceReadiness": "node --test tests/serviceReadiness.test.js",
     "build:bot-images": "sh scripts/build-bot-images.sh",
-    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js tests/processSandboxBackend.test.js tests/sandboxManager.test.js tests/processManagerSandboxIntegration.test.js tests/networkManager.test.js tests/safeZipFolder.test.js tests/securityEngine.test.js tests/snapshotManager.test.js tests/quarantineManager.test.js tests/incidentResponseManager.test.js tests/maintenanceManager.test.js tests/instanceLock.test.js"
+    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js tests/processSandboxBackend.test.js tests/sandboxManager.test.js tests/processManagerSandboxIntegration.test.js tests/networkManager.test.js tests/safeZipFolder.test.js tests/securityEngine.test.js tests/snapshotManager.test.js tests/quarantineManager.test.js tests/incidentResponseManager.test.js tests/maintenanceManager.test.js tests/instanceLock.test.js tests/serviceReadiness.test.js"
   },
   "keywords": [
     "discord",
