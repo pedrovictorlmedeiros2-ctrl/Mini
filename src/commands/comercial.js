@@ -19,16 +19,60 @@ module.exports = [
             registerUser(interaction.user);
 
             if (CommerceConfig.isConfigured()) {
-                return interaction.reply({
-                    content: '⚠️ A loja já está configurada. Para reorganizar os canais, faça isso manualmente no Discord — este comando nunca recria a estrutura pra evitar duplicar categorias.',
-                    ephemeral: true,
-                });
+                const cfg = CommerceConfig.getConfig();
+                if (cfg.staff_role_id) {
+                    return interaction.reply({
+                        content: '⚠️ A loja já está configurada. Para reorganizar os canais, faça isso manualmente no Discord — este comando nunca recria a estrutura pra evitar duplicar categorias.',
+                        ephemeral: true,
+                    });
+                }
+                // REPARO (Fase 4): a loja já existe mas foi configurada
+                // antes do cargo de visibilidade da staff existir — cria
+                // só o cargo que falta e aplica no canal-categoria staff já
+                // existente, sem tocar em mais nada. Este cargo é SÓ pra
+                // enxergar os canais staff — nunca é checado como
+                // autorização (isso continua 100% dentro dos managers via
+                // CommerceStaffManager.hasCommercePermission()).
+                await interaction.deferReply({ ephemeral: true });
+                try {
+                    const guild = interaction.guild;
+                    const staffRole = await guild.roles.create({
+                        name: 'Atlantic Host — Comercial',
+                        mentionable: false,
+                        reason: 'Reparo Fase 4 — visibilidade dos canais comerciais (nunca usado como autorização)',
+                    });
+                    if (cfg.staff_category_id) {
+                        const staffCategory = await guild.channels.fetch(cfg.staff_category_id).catch(() => null);
+                        if (staffCategory) {
+                            await staffCategory.permissionOverwrites.edit(staffRole.id, {
+                                ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
+                            }).catch(() => {});
+                        }
+                    }
+                    CommerceConfig.saveChannelStructure({ staff_role_id: staffRole.id });
+                    return interaction.editReply({
+                        content: `✅ Cargo de visibilidade da staff criado: ${staffRole}. Use \`/comercial-equipe conceder\` pra conceder permissão comercial — o cargo é atribuído automaticamente junto.`,
+                    });
+                } catch (err) {
+                    console.error('❌ Erro ao reparar a estrutura da loja:', err);
+                    return interaction.editReply({ content: `❌ Erro ao criar o cargo de staff: ${err.message}` });
+                }
             }
 
             await interaction.deferReply({ ephemeral: true });
             const guild = interaction.guild;
 
             try {
+                // Cargo de VISIBILIDADE dos canais staff — criado antes da
+                // categoria pra já entrar no overwrite dela. Nunca é a
+                // fonte de autorização: quem decide permissão real é
+                // sempre CommerceStaffManager.hasCommercePermission(),
+                // dentro dos managers.
+                const staffRole = await guild.roles.create({
+                    name: 'Atlantic Host — Comercial',
+                    mentionable: false,
+                    reason: 'Estrutura da loja comercial — visibilidade dos canais staff',
+                });
                 const publicCategory = await guild.channels.create({ name: '🛒 LOJA', type: ChannelType.GuildCategory });
                 const salesPanelChannel = await guild.channels.create({
                     name: 'painel-de-vendas',
@@ -57,7 +101,10 @@ module.exports = [
                     // conveniência/descoberta — a permissão de verdade
                     // (hasCommercePermission) é sempre checada dentro dos
                     // managers, nunca só por quem consegue ver o canal.
-                    permissionOverwrites: [{ id: guild.id, deny: [PermissionFlagsBits.ViewChannel] }],
+                    permissionOverwrites: [
+                        { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                        { id: staffRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+                    ],
                 });
                 const staffPanelChannel = await guild.channels.create({ name: 'painel-comercial', type: ChannelType.GuildText, parent: staffCategory.id });
                 const ordersReviewChannel = await guild.channels.create({ name: 'pedidos-em-analise', type: ChannelType.GuildText, parent: staffCategory.id });
@@ -74,15 +121,16 @@ module.exports = [
                     orders_review_channel_id: ordersReviewChannel.id,
                     proofs_channel_id: proofsChannel.id,
                     sales_log_channel_id: salesLogChannel.id,
-                    staff_role_id: null,
+                    staff_role_id: staffRole.id,
                 });
 
                 await interaction.editReply({
                     content:
                         `✅ Estrutura criada:\n` +
                         `**Loja:** ${salesPanelChannel} · ${faqChannel}\n` +
-                        `**Staff:** ${staffPanelChannel} · ${ordersReviewChannel} · ${proofsChannel} · ${salesLogChannel}\n\n` +
-                        `Use \`/painel-comercial\` em ${staffPanelChannel} para publicar o painel administrativo, e \`/painel-de-vendas\` em ${salesPanelChannel} para publicar a vitrine pro cliente.`,
+                        `**Staff:** ${staffPanelChannel} · ${ordersReviewChannel} · ${proofsChannel} · ${salesLogChannel}\n` +
+                        `**Cargo de visibilidade staff:** ${staffRole}\n\n` +
+                        `Use \`/painel-comercial\` em ${staffPanelChannel} para publicar o painel administrativo, \`/painel-de-vendas\` em ${salesPanelChannel} para publicar a vitrine pro cliente, e \`/comercial-equipe conceder\` para dar permissão comercial a alguém (concede o cargo ${staffRole} automaticamente).`,
                 });
             } catch (err) {
                 console.error('❌ Erro ao configurar a loja:', err);
@@ -111,6 +159,61 @@ module.exports = [
             registerUser(interaction.user);
             const { publishStaffPanel } = require('../handlers/domains/commerce');
             await publishStaffPanel(interaction);
+        },
+    },
+    {
+        // CORREÇÃO (Fase 4 — fricção operacional documentada na Fase 3):
+        // um COMMERCE_STAFF ativo (concedido só no banco, via
+        // CommerceStaffManager) não enxergava os canais staff sem alguém
+        // atribuir manualmente o cargo do Discord. Este comando junta as
+        // duas coisas num só passo — mas o cargo do Discord aqui é
+        // SEMPRE só uma conveniência de VISIBILIDADE. A autorização real
+        // nunca depende dele: é sempre CommerceStaffManager.hasCommercePermission()
+        // (linha em commerce_staff no banco), revalidada dentro de cada
+        // manager, independente de o usuário ter ou não o cargo.
+        data: new SlashCommandBuilder()
+            .setName('comercial-equipe')
+            .setDescription('Concede ou revoga permissão comercial (COMMERCE_STAFF) a um usuário')
+            .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+            .addSubcommand((sub) => sub
+                .setName('conceder')
+                .setDescription('Concede COMMERCE_STAFF a um usuário')
+                .addUserOption((opt) => opt.setName('usuario').setDescription('Usuário a conceder').setRequired(true)))
+            .addSubcommand((sub) => sub
+                .setName('revogar')
+                .setDescription('Revoga COMMERCE_STAFF de um usuário')
+                .addUserOption((opt) => opt.setName('usuario').setDescription('Usuário a revogar').setRequired(true))),
+
+        async execute(interaction) {
+            registerUser(interaction.user);
+            const CommerceStaffManager = require('../managers/commerce/CommerceStaffManager');
+            const target = interaction.options.getUser('usuario', true);
+            const sub = interaction.options.getSubcommand();
+
+            await interaction.deferReply({ ephemeral: true });
+            try {
+                const cfg = CommerceConfig.getConfig();
+                if (sub === 'conceder') {
+                    CommerceStaffManager.grant(target.id, interaction.user.id, interaction.guild?.id || null);
+                    if (cfg?.staff_role_id) {
+                        const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+                        if (member) await member.roles.add(cfg.staff_role_id).catch(() => {});
+                    }
+                    return interaction.editReply({
+                        content: `✅ ${target} agora tem permissão comercial (COMMERCE_STAFF).` +
+                            (cfg?.staff_role_id ? '' : ' ⚠️ Cargo de visibilidade ainda não existe — rode `/configurar-loja` de novo pra criá-lo.'),
+                    });
+                }
+
+                CommerceStaffManager.revoke(target.id, interaction.user.id);
+                if (cfg?.staff_role_id) {
+                    const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+                    if (member) await member.roles.remove(cfg.staff_role_id).catch(() => {});
+                }
+                return interaction.editReply({ content: `✅ ${target} não tem mais permissão comercial (COMMERCE_STAFF).` });
+            } catch (err) {
+                return interaction.editReply({ content: `❌ ${err.message}` });
+            }
         },
     },
 ];

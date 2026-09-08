@@ -34,7 +34,7 @@ const CommerceStaffManager = require('../../managers/commerce/CommerceStaffManag
 const CommerceConfig = require('../../managers/commerce/CommerceConfig');
 
 const EXACT = [
-    'commerce_view_plans', 'commerce_buy_plan', 'commerce_support', 'commerce_pay',
+    'commerce_view_plans', 'commerce_view_plan_details', 'commerce_buy_plan', 'commerce_support', 'commerce_pay',
     'commerce_send_proof', 'commerce_cancel_order', 'commerce_select_product',
     'commerce_staff_queue', 'commerce_staff_select_order',
     'commerce_admin_products', 'commerce_admin_create_product', 'modal_commerce_admin_create_product',
@@ -51,14 +51,35 @@ function match(customId) {
     return PREFIXES.some((p) => customId.startsWith(p));
 }
 
+// Locks em memória — mesmo princípio já usado em outros pontos do
+// sistema (ex.: locks síncronos do IncidentResponseManager): checados e
+// setados de forma SÍNCRONA, antes de qualquer `await`, pra fechar a
+// janela de corrida entre dois cliques rápidos do mesmo cliente gerando
+// duas invocações concorrentes de handle() (cada uma delas retoma em
+// pontos diferentes depois de um await, intercaladas pelo event loop).
+const buyClaimLocks = new Set(); // userId -> já está criando um pedido agora
+const activeProofCollectors = new Set(); // orderId -> já existe um coletor de comprovante esperando
+
 // ── Helpers de embed/exibição — nunca contêm lógica de negócio ──────────
 
 function formatMoney(value) {
     return `R$ ${Number(value).toFixed(2)}`;
 }
 
+function billingPeriodLabel(period) {
+    return period === 'monthly' ? 'mês' : (period || 'mês');
+}
+
 function productSummaryLine(p) {
-    return `**${p.name}** — \`${formatMoney(p.price)}/mês\`\n> 🤖 ${p.max_bots} bot(s) · 🧠 ${p.max_ram}MB RAM · ⚡ ${p.max_cpu}% CPU`;
+    return `**${p.name}** — \`${formatMoney(p.price)}/${billingPeriodLabel(p.billing_period)}\`\n> 🤖 ${p.max_bots} bot(s) · 🧠 ${p.max_ram}MB RAM · ⚡ ${p.max_cpu}% CPU · 💾 ${p.storage}MB`;
+}
+
+function productDetailDescription(p) {
+    return (
+        `${p.description ? `${p.description}\n\n` : ''}` +
+        `**Preço:** \`${formatMoney(p.price)}/${billingPeriodLabel(p.billing_period)}\`\n` +
+        `**Recursos:** 🤖 ${p.max_bots} bot(s) · 🧠 ${p.max_ram}MB RAM · ⚡ ${p.max_cpu}% CPU · 💾 ${p.storage}MB armazenamento`
+    );
 }
 
 async function notifyBuyer(client, userId, content) {
@@ -126,6 +147,34 @@ async function handle(interaction, helpers = {}) {
             .setColor('#00AAFF')
             .setTitle('📋 Planos Disponíveis')
             .setDescription(plans.map(productSummaryLine).join('\n\n'));
+        const detailSelect = new StringSelectMenuBuilder()
+            .setCustomId('commerce_view_plan_details')
+            .setPlaceholder('Ver detalhes de um plano...')
+            .addOptions(plans.slice(0, 25).map((p) => ({
+                label: p.name,
+                description: `${formatMoney(p.price)}/${billingPeriodLabel(p.billing_period)}`,
+                value: p.id,
+            })));
+        const buyRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('commerce_buy_plan').setLabel('Comprar Plano').setEmoji('🛒').setStyle(ButtonStyle.Success)
+        );
+        return interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(detailSelect), buyRow], ephemeral: true });
+    }
+
+    if (customId === 'commerce_view_plan_details') {
+        const productId = interaction.values[0];
+        const product = ProductCatalog.getProduct(productId);
+        // Revalida PUBLISHED aqui mesmo — o select foi montado a partir
+        // de getPublishedProducts(), mas o valor que volta é sempre
+        // tratado como adversarial (podia ter sido despublicado entre a
+        // montagem do menu e o clique, ou forjado).
+        if (!product || product.status !== ProductCatalog.PRODUCT_STATUS.PUBLISHED) {
+            return interaction.reply({ content: '❌ Este plano não está mais disponível.', ephemeral: true });
+        }
+        const embed = new EmbedBuilder()
+            .setColor('#00AAFF')
+            .setTitle(`📋 ${product.name}`)
+            .setDescription(productDetailDescription(product));
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('commerce_buy_plan').setLabel('Comprar Plano').setEmoji('🛒').setStyle(ButtonStyle.Success)
         );
@@ -139,75 +188,94 @@ async function handle(interaction, helpers = {}) {
     }
 
     if (customId === 'commerce_buy_plan') {
-        const existingOrder = get(
-            `SELECT channel_id FROM commerce_orders WHERE user_id = ? AND status IN ('DRAFT','AWAITING_PAYMENT','PROOF_SUBMITTED','UNDER_REVIEW')`,
-            [interaction.user.id]
-        );
-        if (existingOrder) {
-            return interaction.reply({ content: `❌ Você já possui um pedido em andamento: <#${existingOrder.channel_id}>`, ephemeral: true });
+        const buyerId = interaction.user.id;
+
+        // Lock síncrono ANTES de qualquer checagem/await — sem isso, dois
+        // cliques rápidos no botão geram duas invocações de handle() que
+        // passam pela checagem de "já tem pedido em andamento" ANTES de
+        // qualquer uma delas ter criado o pedido (a corrida real fica no
+        // intervalo entre esta checagem e o `await guild.channels.create()`
+        // mais abaixo) — resultando em dois canais/pedidos pro mesmo
+        // cliente. Checar e marcar o lock aqui, no mesmo tick síncrono,
+        // fecha essa janela por completo.
+        if (buyClaimLocks.has(buyerId)) {
+            return interaction.reply({ content: '⏳ Já estamos processando seu pedido — aguarde um instante.', ephemeral: true });
         }
+        buyClaimLocks.add(buyerId);
 
-        const cartLimit = checkRateLimit(`commerce_cart:${interaction.user.id}`, 10, 60 * 60 * 1000);
-        if (!cartLimit.allowed) {
-            return interaction.reply({ content: `❌ Muitos pedidos criados recentemente. Tente novamente em ${formatRetryAfter(cartLimit.retryAfterMs)}.`, ephemeral: true });
-        }
-
-        await interaction.reply({ content: '⏳ Criando seu pedido...', ephemeral: true });
-
-        let channel;
         try {
-            const guild = interaction.guild;
-            const cfg = CommerceConfig.getConfig();
-            const permissionOverwrites = [
-                { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-                { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-            ];
-            if (cfg?.staff_role_id) {
-                permissionOverwrites.push({ id: cfg.staff_role_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-            }
-
-            channel = await guild.channels.create({
-                name: `pedido-${interaction.user.username}`.slice(0, 90),
-                type: ChannelType.GuildText,
-                parent: cfg?.public_category_id || undefined,
-                permissionOverwrites,
-            });
-
-            const order = OrderManager.createOrder({ userId: interaction.user.id, channelId: channel.id, guildId: guild.id });
-
-            const products = ProductCatalog.getPublishedProducts();
-            if (products.length === 0) {
-                await channel.send('❌ Nenhum plano disponível no momento. Este canal será fechado em 10 segundos.');
-                setTimeout(() => channel.delete().catch(() => {}), 10000);
-                return interaction.editReply({ content: '❌ Nenhum plano disponível no momento.' });
-            }
-
-            const select = new StringSelectMenuBuilder()
-                .setCustomId('commerce_select_product')
-                .setPlaceholder('Selecione um plano...')
-                .addOptions(products.slice(0, 25).map((p) => ({
-                    label: p.name,
-                    description: `${formatMoney(p.price)}/mês | ${p.max_bots} bot(s) | ${p.max_ram}MB RAM`,
-                    value: p.id,
-                })));
-            const row = new ActionRowBuilder().addComponents(select);
-            const cancelRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('commerce_cancel_order').setLabel('Cancelar Pedido').setEmoji('❌').setStyle(ButtonStyle.Danger)
+            const existingOrder = get(
+                `SELECT channel_id FROM commerce_orders WHERE user_id = ? AND status IN ('DRAFT','AWAITING_PAYMENT','PROOF_SUBMITTED','UNDER_REVIEW')`,
+                [buyerId]
             );
-
-            const embed = new EmbedBuilder()
-                .setColor('#00AAFF')
-                .setTitle('🛒 Seu Pedido')
-                .setDescription(`Olá ${interaction.user}, selecione um plano abaixo pra continuar.`);
-
-            await channel.send({ content: `${interaction.user}`, embeds: [embed], components: [row, cancelRow] });
-            await interaction.editReply({ content: `✅ Pedido criado: ${channel}` });
-        } catch (err) {
-            console.error('❌ Erro ao criar pedido comercial:', err);
-            if (channel?.deletable) {
-                try { await channel.delete('Erro ao criar pedido — limpeza automática'); } catch { /* ignora */ }
+            if (existingOrder) {
+                return interaction.reply({ content: `❌ Você já possui um pedido em andamento: <#${existingOrder.channel_id}>`, ephemeral: true });
             }
-            await interaction.editReply({ content: '❌ Erro ao criar seu pedido. Tente novamente ou avise a equipe de suporte.' });
+
+            const cartLimit = checkRateLimit(`commerce_cart:${buyerId}`, 10, 60 * 60 * 1000);
+            if (!cartLimit.allowed) {
+                return interaction.reply({ content: `❌ Muitos pedidos criados recentemente. Tente novamente em ${formatRetryAfter(cartLimit.retryAfterMs)}.`, ephemeral: true });
+            }
+
+            await interaction.reply({ content: '⏳ Criando seu pedido...', ephemeral: true });
+
+            let channel;
+            try {
+                const guild = interaction.guild;
+                const cfg = CommerceConfig.getConfig();
+                const permissionOverwrites = [
+                    { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                    { id: buyerId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+                ];
+                if (cfg?.staff_role_id) {
+                    permissionOverwrites.push({ id: cfg.staff_role_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+                }
+
+                channel = await guild.channels.create({
+                    name: `pedido-${interaction.user.username}`.slice(0, 90),
+                    type: ChannelType.GuildText,
+                    parent: cfg?.public_category_id || undefined,
+                    permissionOverwrites,
+                });
+
+                const order = OrderManager.createOrder({ userId: buyerId, channelId: channel.id, guildId: guild.id });
+
+                const products = ProductCatalog.getPublishedProducts();
+                if (products.length === 0) {
+                    await channel.send('❌ Nenhum plano disponível no momento. Este canal será fechado em 10 segundos.');
+                    setTimeout(() => channel.delete().catch(() => {}), 10000);
+                    return interaction.editReply({ content: '❌ Nenhum plano disponível no momento.' });
+                }
+
+                const select = new StringSelectMenuBuilder()
+                    .setCustomId('commerce_select_product')
+                    .setPlaceholder('Selecione um plano...')
+                    .addOptions(products.slice(0, 25).map((p) => ({
+                        label: p.name,
+                        description: `${formatMoney(p.price)}/${billingPeriodLabel(p.billing_period)} | ${p.max_bots} bot(s) | ${p.max_ram}MB RAM`,
+                        value: p.id,
+                    })));
+                const row = new ActionRowBuilder().addComponents(select);
+                const cancelRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('commerce_cancel_order').setLabel('Cancelar Pedido').setEmoji('❌').setStyle(ButtonStyle.Danger)
+                );
+
+                const embed = new EmbedBuilder()
+                    .setColor('#00AAFF')
+                    .setTitle('🛒 Seu Pedido')
+                    .setDescription(`Olá ${interaction.user}, selecione um plano abaixo pra continuar.`);
+
+                await channel.send({ content: `${interaction.user}`, embeds: [embed], components: [row, cancelRow] });
+                await interaction.editReply({ content: `✅ Pedido criado: ${channel}` });
+            } catch (err) {
+                console.error('❌ Erro ao criar pedido comercial:', err);
+                if (channel?.deletable) {
+                    try { await channel.delete('Erro ao criar pedido — limpeza automática'); } catch { /* ignora */ }
+                }
+                await interaction.editReply({ content: '❌ Erro ao criar seu pedido. Tente novamente ou avise a equipe de suporte.' });
+            }
+        } finally {
+            buyClaimLocks.delete(buyerId);
         }
         return;
     }
@@ -279,6 +347,18 @@ async function handle(interaction, helpers = {}) {
             return interaction.reply({ content: '❌ Pedido não encontrado.', ephemeral: true });
         }
 
+        // Lock síncrono por pedido, checado ANTES de criar o coletor —
+        // um clique duplo em "Enviar Comprovante" cria dois
+        // MessageCollector independentes no MESMO canal; ambos casam com
+        // o mesmo filtro e RECEBEM a mesma mensagem (um collector nunca
+        // "consome" a mensagem pro outro), o que chamaria
+        // ProofManager.submitProof() duas vezes pro mesmo anexo. Só um
+        // coletor ativo por pedido, sempre.
+        if (activeProofCollectors.has(order.id)) {
+            return interaction.reply({ content: '⏳ Já estamos aguardando seu comprovante — envie o arquivo na mensagem do canal.', ephemeral: true });
+        }
+        activeProofCollectors.add(order.id);
+
         await interaction.reply({
             content: `📤 Envie a imagem (JPG/PNG/WEBP) ou PDF do seu comprovante agora (máx. ${Math.round(config.commerce.maxProofSizeBytes / (1024 * 1024))}MB).`,
             ephemeral: true,
@@ -309,6 +389,12 @@ async function handle(interaction, helpers = {}) {
             } finally {
                 await m.delete().catch(() => {});
             }
+        });
+        // 'end' sempre dispara (recebeu o máximo OU estourou o tempo) —
+        // libera o lock nos dois casos, nunca deixando o pedido travado
+        // sem um jeito de tentar de novo.
+        collector.on('end', () => {
+            activeProofCollectors.delete(order.id);
         });
         return;
     }
