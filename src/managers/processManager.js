@@ -99,20 +99,6 @@ function syncStatusOnStartup() {
 // initDatabase() já ter rodado (ver comentário lá).
 
 /**
- * Persiste uma linha de log em arquivo (além da memória).
- * Operação best-effort: falhas são silenciosas para não derrubar o processo.
- */
-function appendLogToFile(botId, type, text) {
-    try {
-        const logPath = path.join(config.system.logsFolder, `${botId}.log`);
-        const line = `[${new Date().toISOString()}] [${type.toUpperCase()}] ${text}\n`;
-        fs.appendFileSync(logPath, line, 'utf-8');
-    } catch {
-        // Falha silenciosa
-    }
-}
-
-/**
  * Detecta o comando correto para Python no sistema.
  * Tenta python3 primeiro (padrão em sistemas modernos), depois python.
  */
