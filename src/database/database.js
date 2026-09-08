@@ -488,6 +488,14 @@ function initDatabase() {
     // existiu e foi revisado), só o arquivo cifrado em disco.
     try { db.exec(`ALTER TABLE commerce_proofs ADD COLUMN purged_at DATETIME`); } catch { /* já existe */ }
 
+    // FASE 8 COMERCIAL (renovação self-service): marca quando o aviso de
+    // "seu plano expira em breve" já foi enviado pra este entitlement —
+    // nunca reenviado no mesmo ciclo (CommerceScheduler.sweepExpiringEntitlements()).
+    // Nasce NULL sempre que um entitlement novo é criado (grant() nunca
+    // seta esta coluna), inclusive numa renovação — o ciclo novo sempre
+    // pode gerar um aviso novo, sem lógica extra de reset.
+    try { db.exec(`ALTER TABLE commerce_entitlements ADD COLUMN renewal_reminder_sent_at DATETIME`); } catch { /* já existe */ }
+
     // Estrutura de canais/categorias da loja comercial (Fase 3) — separada
     // de `sales_config` (legado: category_id/admin_role_id são de UM
     // canal de carrinho por vez). Uma linha só (id=1), preenchida pelo

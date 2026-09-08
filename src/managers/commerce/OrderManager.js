@@ -65,20 +65,32 @@ const VALID_TRANSITIONS = Object.freeze({
 
 const TERMINAL_STATUSES = Object.freeze([STATUS.ACTIVE, STATUS.REJECTED, STATUS.CANCELLED, STATUS.EXPIRED]);
 
-/** Cria um pedido novo — sempre nasce em DRAFT, sem produto selecionado. */
-function createOrder({ userId, channelId, guildId = null }) {
+/**
+ * Cria um pedido novo — sempre nasce em DRAFT, sem produto selecionado.
+ *
+ * `renewalOfEntitlementId` (Fase 8): quando o pedido nasce de um fluxo de
+ * renovação (`commerce_renew_plan`), já grava a referência ao entitlement
+ * sendo renovado NO MOMENTO DA CRIAÇÃO — antes mesmo do produto ser
+ * escolhido. Isso é o que permite `commerce_select_product` recuperar essa
+ * intenção mais tarde (lendo de volta o próprio Order) e repassá-la pra
+ * `confirmProduct()`, sem precisar de nenhum estado em memória entre a
+ * criação do canal e a escolha do produto (que pode levar minutos/horas).
+ * `confirmProduct()` continua sendo o único lugar que de fato TRANSICIONA
+ * o pedido — esta coluna, aqui, é só dado inicial, igual `guild_id`.
+ */
+function createOrder({ userId, channelId, guildId = null, renewalOfEntitlementId = null }) {
     if (!userId || !channelId) {
         throw new Error('OrderManager.createOrder requer userId e channelId.');
     }
     run(
-        'INSERT INTO commerce_orders (guild_id, user_id, channel_id, status) VALUES (?, ?, ?, ?)',
-        [guildId, userId, channelId, STATUS.DRAFT]
+        'INSERT INTO commerce_orders (guild_id, user_id, channel_id, status, renewal_of_entitlement_id) VALUES (?, ?, ?, ?, ?)',
+        [guildId, userId, channelId, STATUS.DRAFT, renewalOfEntitlementId]
     );
     const order = get('SELECT * FROM commerce_orders WHERE channel_id = ?', [channelId]);
     recordAuditEvent({
         userId,
         event: 'commerce:order_created',
-        details: JSON.stringify({ orderId: order.id, guildId }),
+        details: JSON.stringify({ orderId: order.id, guildId, renewalOfEntitlementId }),
         severity: 'info',
     });
     return order;

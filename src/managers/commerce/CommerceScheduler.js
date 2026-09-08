@@ -7,19 +7,25 @@
  *  - sweepExpiredCarts(): AWAITING_PAYMENT sem comprovante depois de N
  *    horas (default 2h, configurável — decisão de negócio confirmada) →
  *    EXPIRED. Nunca cobra, nunca provisiona nada.
+ *  - sweepExpiringEntitlements() (Fase 8): entitlements 'active' expirando
+ *    dentro de `config.commerce.renewalReminderDays` dias, ainda não
+ *    avisados neste ciclo → DM best-effort orientando a renovar, marca
+ *    `renewal_reminder_sent_at` (nunca reenvia no mesmo ciclo).
  *  - sweepExpiredEntitlements(): entitlements 'active' cujo expires_at
- *    já passou → 'expired', recomputa capacidade do usuário.
+ *    já passou → 'expired', recomputa capacidade do usuário, DM
+ *    best-effort avisando que expirou (Fase 8).
  *  - reconcileStuckProvisioning(): pedidos presos em PROVISIONING (o
  *    processo caiu no meio) → PROVISIONING_FAILED. Mesmo princípio do
  *    `IncidentResponseManager.reconcileStuckIncidents()` do Kamikaze:
- *    nunca tenta resumir um provisionamento parcial às cegas. Ainda sem
- *    ProvisioningManager real nesta fase — esta função já fica pronta
- *    (e testada) pro dia em que ele existir.
+ *    nunca tenta resumir um provisionamento parcial às cegas. Chamado só
+ *    uma vez, no boot (ver index.js) — nunca nesta varredura periódica
+ *    (rodar enquanto o ProvisioningManager está genuinamente no meio de
+ *    um provisionamento derrubaria uma tentativa legítima).
  *
- * Não é chamado automaticamente por index.js nesta fase (o painel/fluxo
- * público de compra, que é quem geraria pedidos de verdade em produção,
- * também não está implementado ainda) — start/stop existem pra quando a
- * fase que liga a interface do Discord também ligar o timer.
+ * `startCommerceScheduler()` é chamado uma vez no boot (index.js, Fase 8)
+ * — antes disso (Fases 2-7), a função existia e era testada isoladamente,
+ * mas nunca era ligada em produção; nenhuma destas sweeps rodava de fato
+ * fora de teste.
  */
 const { query } = require('../../database/database');
 const { recordAuditEvent } = require('../auditManager');
@@ -27,6 +33,7 @@ const config = require('../../../config');
 const OrderManager = require('./OrderManager');
 const EntitlementManager = require('./EntitlementManager');
 const ProofManager = require('./ProofManager');
+const { tryDM } = require('../../utils/clientRef');
 
 let sweepTimer = null;
 
@@ -54,7 +61,17 @@ function sweepExpiredCarts() {
     return expiredCount;
 }
 
-/** Entitlements 'active' com expires_at já no passado → 'expired'. */
+/**
+ * Entitlements 'active' com expires_at já no passado → 'expired'.
+ *
+ * Fase 8: também dispara uma DM best-effort avisando o cliente que o
+ * plano expirou, com orientação pra renovar. `tryDM()` (src/utils/clientRef.js)
+ * nunca lança — nem quando o client do Discord ainda não está pronto, nem
+ * quando a DM falha (fechada, usuário saiu de todos os servidores em
+ * comum) — então é chamada sem `await` de propósito: a falha de
+ * notificação NUNCA pode atrasar nem quebrar a sweep em si (mesmo
+ * princípio fail-safe já usado em `notifyBuyer()` de commerce.js).
+ */
 function sweepExpiredEntitlements() {
     const candidates = query(
         `SELECT * FROM commerce_entitlements WHERE status = ? AND expires_at <= datetime('now')`,
@@ -65,12 +82,56 @@ function sweepExpiredEntitlements() {
     for (const entitlement of candidates) {
         EntitlementManager.expireEntitlement(entitlement.id);
         count += 1;
+        tryDM(
+            entitlement.user_id,
+            '⏰ **Seu plano expirou.** Sua capacidade de hospedagem foi reduzida. ' +
+            'Use o botão **Renovar Plano** na loja pra reativar sem interrupção.'
+        );
     }
     if (count) {
         recordAuditEvent({
             userId: null,
             event: 'commerce:scheduler_entitlements_expired',
             details: JSON.stringify({ count }),
+            severity: 'info',
+        });
+    }
+    return count;
+}
+
+/**
+ * Fase 8: entitlements 'active' expirando dentro de
+ * `config.commerce.renewalReminderDays` dias, ainda não avisados neste
+ * ciclo — avisa e marca (`EntitlementManager.markRenewalReminderSent()`,
+ * único lugar que escreve essa coluna, nunca um UPDATE direto aqui).
+ * Nunca reenvia no mesmo ciclo; uma renovação cria um entitlement novo
+ * (`renewal_reminder_sent_at` nasce NULL de novo), então o próximo ciclo
+ * sempre pode gerar um aviso novo, sem lógica extra de reset.
+ */
+function sweepExpiringEntitlements() {
+    const days = config.commerce.renewalReminderDays;
+    const candidates = query(
+        `SELECT * FROM commerce_entitlements
+         WHERE status = ? AND renewal_reminder_sent_at IS NULL
+           AND expires_at <= datetime('now', ?) AND expires_at > datetime('now')`,
+        [EntitlementManager.ENTITLEMENT_STATUS.ACTIVE, `+${days} days`]
+    );
+
+    let count = 0;
+    for (const entitlement of candidates) {
+        EntitlementManager.markRenewalReminderSent(entitlement.id);
+        count += 1;
+        tryDM(
+            entitlement.user_id,
+            `⚠️ **Seu plano expira em breve** (${entitlement.expires_at}). ` +
+            'Use o botão **Renovar Plano** na loja pra continuar sem perder capacidade.'
+        );
+    }
+    if (count) {
+        recordAuditEvent({
+            userId: null,
+            event: 'commerce:scheduler_expiration_reminders_sent',
+            details: JSON.stringify({ count, windowDays: days }),
             severity: 'info',
         });
     }
@@ -115,6 +176,7 @@ function sweepExpiredProofs() {
 
 function runAllSweeps() {
     sweepExpiredCarts();
+    sweepExpiringEntitlements();
     sweepExpiredEntitlements();
     sweepExpiredProofs();
 }
@@ -140,6 +202,7 @@ function stopCommerceScheduler() {
 
 module.exports = {
     sweepExpiredCarts,
+    sweepExpiringEntitlements,
     sweepExpiredEntitlements,
     sweepExpiredProofs,
     reconcileStuckProvisioning,

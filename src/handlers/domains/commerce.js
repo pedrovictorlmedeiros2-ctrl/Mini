@@ -31,12 +31,13 @@ const OrderManager = require('../../managers/commerce/OrderManager');
 const PaymentManager = require('../../managers/commerce/PaymentManager');
 const ProofManager = require('../../managers/commerce/ProofManager');
 const ProvisioningManager = require('../../managers/commerce/ProvisioningManager');
+const EntitlementManager = require('../../managers/commerce/EntitlementManager');
 const CommerceStaffManager = require('../../managers/commerce/CommerceStaffManager');
 const CommerceConfig = require('../../managers/commerce/CommerceConfig');
 const queueManager = require('../../managers/queueManager');
 
 const EXACT = [
-    'commerce_view_plans', 'commerce_view_plan_details', 'commerce_buy_plan', 'commerce_support', 'commerce_pay',
+    'commerce_view_plans', 'commerce_view_plan_details', 'commerce_buy_plan', 'commerce_renew_plan', 'commerce_support', 'commerce_pay',
     'commerce_send_proof', 'commerce_cancel_order', 'commerce_select_product',
     'commerce_staff_queue', 'commerce_staff_select_order', 'commerce_staff_provisioning_failures',
     'commerce_admin_products', 'commerce_admin_create_product', 'modal_commerce_admin_create_product',
@@ -99,6 +100,111 @@ async function postToChannel(guild, channelId, payload) {
     if (channel) await channel.send(payload).catch(() => {});
 }
 
+/**
+ * FASE 8: núcleo compartilhado de criação do canal de pedido — usado tanto
+ * por "Comprar Plano" quanto por "Renovar Plano". A única diferença real
+ * entre os dois fluxos é `renewalOfEntitlementId` (persistido no Order já
+ * na criação — ver OrderManager.createOrder — pra `commerce_select_product`
+ * recuperar mais tarde e repassar a `confirmProduct()`) e o texto de
+ * boas-vindas no canal; lock/rate-limit/permissões/criação de canal são
+ * idênticos, então vivem num só lugar (nunca duas implementações que podem
+ * divergir).
+ */
+async function createOrderChannel(interaction, buyerId, { renewalOfEntitlementId = null, welcomeText } = {}) {
+    // Lock síncrono ANTES de qualquer checagem/await — sem isso, dois
+    // cliques rápidos no botão geram duas invocações de handle() que
+    // passam pela checagem de "já tem pedido em andamento" ANTES de
+    // qualquer uma delas ter criado o pedido (a corrida real fica no
+    // intervalo entre esta checagem e o `await guild.channels.create()`
+    // mais abaixo) — resultando em dois canais/pedidos pro mesmo cliente.
+    // Checar e marcar o lock aqui, no mesmo tick síncrono, fecha essa
+    // janela por completo. Mesmo lock compartilhado entre compra e
+    // renovação de propósito (Fase 8) — impede também um cliente abrir uma
+    // compra E uma renovação ao mesmo tempo.
+    if (buyClaimLocks.has(buyerId)) {
+        return interaction.reply({ content: '⏳ Já estamos processando seu pedido — aguarde um instante.', ephemeral: true });
+    }
+    buyClaimLocks.add(buyerId);
+
+    try {
+        const existingOrder = get(
+            `SELECT channel_id FROM commerce_orders WHERE user_id = ? AND status IN ('DRAFT','AWAITING_PAYMENT','PROOF_SUBMITTED','UNDER_REVIEW')`,
+            [buyerId]
+        );
+        if (existingOrder) {
+            return interaction.reply({ content: `❌ Você já possui um pedido em andamento: <#${existingOrder.channel_id}>`, ephemeral: true });
+        }
+
+        // Mesma chave de rate limit pra compra e renovação — evita que
+        // alternar entre os dois botões vire uma forma de contornar o
+        // limite de criação de canais.
+        const cartLimit = checkRateLimit(`commerce_cart:${buyerId}`, 10, 60 * 60 * 1000);
+        if (!cartLimit.allowed) {
+            return interaction.reply({ content: `❌ Muitos pedidos criados recentemente. Tente novamente em ${formatRetryAfter(cartLimit.retryAfterMs)}.`, ephemeral: true });
+        }
+
+        await interaction.reply({ content: '⏳ Criando seu pedido...', ephemeral: true });
+
+        let channel;
+        try {
+            const guild = interaction.guild;
+            const cfg = CommerceConfig.getConfig();
+            const permissionOverwrites = [
+                { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                { id: buyerId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+            ];
+            if (cfg?.staff_role_id) {
+                permissionOverwrites.push({ id: cfg.staff_role_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+            }
+
+            channel = await guild.channels.create({
+                name: `pedido-${interaction.user.username}`.slice(0, 90),
+                type: ChannelType.GuildText,
+                parent: cfg?.public_category_id || undefined,
+                permissionOverwrites,
+            });
+
+            const order = OrderManager.createOrder({ userId: buyerId, channelId: channel.id, guildId: guild.id, renewalOfEntitlementId });
+
+            const products = ProductCatalog.getPublishedProducts();
+            if (products.length === 0) {
+                await channel.send('❌ Nenhum plano disponível no momento. Este canal será fechado em 10 segundos.');
+                setTimeout(() => channel.delete().catch(() => {}), 10000);
+                return interaction.editReply({ content: '❌ Nenhum plano disponível no momento.' });
+            }
+
+            const select = new StringSelectMenuBuilder()
+                .setCustomId('commerce_select_product')
+                .setPlaceholder('Selecione um plano...')
+                .addOptions(products.slice(0, 25).map((p) => ({
+                    label: p.name,
+                    description: `${formatMoney(p.price)}/${billingPeriodLabel(p.billing_period)} | ${p.max_bots} bot(s) | ${p.max_ram}MB RAM`,
+                    value: p.id,
+                })));
+            const row = new ActionRowBuilder().addComponents(select);
+            const cancelRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('commerce_cancel_order').setLabel('Cancelar Pedido').setEmoji('❌').setStyle(ButtonStyle.Danger)
+            );
+
+            const embed = new EmbedBuilder()
+                .setColor('#00AAFF')
+                .setTitle(renewalOfEntitlementId ? '🔄 Renovação de Plano' : '🛒 Seu Pedido')
+                .setDescription(welcomeText || `Olá ${interaction.user}, selecione um plano abaixo pra continuar.`);
+
+            await channel.send({ content: `${interaction.user}`, embeds: [embed], components: [row, cancelRow] });
+            await interaction.editReply({ content: `✅ Pedido criado: ${channel}` });
+        } catch (err) {
+            console.error('❌ Erro ao criar pedido comercial:', err);
+            if (channel?.deletable) {
+                try { await channel.delete('Erro ao criar pedido — limpeza automática'); } catch { /* ignora */ }
+            }
+            await interaction.editReply({ content: '❌ Erro ao criar seu pedido. Tente novamente ou avise a equipe de suporte.' });
+        }
+    } finally {
+        buyClaimLocks.delete(buyerId);
+    }
+}
+
 // ── PAINÉIS PUBLICADOS PELOS COMANDOS (/painel-de-vendas, /painel-comercial) ──
 
 async function publishStorefront(interaction) {
@@ -108,6 +214,7 @@ async function publishStorefront(interaction) {
         .setDescription('Escolha um plano de hospedagem abaixo. Precisa de ajuda? Use o canal de dúvidas.');
     const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('commerce_buy_plan').setLabel('Comprar Plano').setEmoji('🛒').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('commerce_renew_plan').setLabel('Renovar Plano').setEmoji('🔄').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('commerce_view_plans').setLabel('Ver Planos').setEmoji('📋').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('commerce_support').setLabel('Suporte').setEmoji('💬').setStyle(ButtonStyle.Secondary)
     );
@@ -195,94 +302,49 @@ async function handle(interaction, helpers = {}) {
     if (customId === 'commerce_buy_plan') {
         const buyerId = interaction.user.id;
 
-        // Lock síncrono ANTES de qualquer checagem/await — sem isso, dois
-        // cliques rápidos no botão geram duas invocações de handle() que
-        // passam pela checagem de "já tem pedido em andamento" ANTES de
-        // qualquer uma delas ter criado o pedido (a corrida real fica no
-        // intervalo entre esta checagem e o `await guild.channels.create()`
-        // mais abaixo) — resultando em dois canais/pedidos pro mesmo
-        // cliente. Checar e marcar o lock aqui, no mesmo tick síncrono,
-        // fecha essa janela por completo.
-        if (buyClaimLocks.has(buyerId)) {
-            return interaction.reply({ content: '⏳ Já estamos processando seu pedido — aguarde um instante.', ephemeral: true });
-        }
-        buyClaimLocks.add(buyerId);
-
-        try {
-            const existingOrder = get(
-                `SELECT channel_id FROM commerce_orders WHERE user_id = ? AND status IN ('DRAFT','AWAITING_PAYMENT','PROOF_SUBMITTED','UNDER_REVIEW')`,
-                [buyerId]
+        // FASE 8: compra tradicional é bloqueada por completo se o cliente
+        // já tem um entitlement ATIVO — nunca cria pedido/canal/pagamento
+        // antes desta checagem (regra explícita da fase). Um cliente com
+        // plano ativo só pode RENOVAR (commerce_renew_plan) — evita o
+        // cenário da Fase 7 em que o conflito só era descoberto depois de
+        // pagamento e revisão inteiros (EntitlementConflictError só no
+        // provisionamento). Elegibilidade de renovação (ativo OU expirado
+        // recente) é mais ampla que este bloqueio de propósito — só
+        // ENTITLEMENT ATIVO impede a compra tradicional.
+        if (EntitlementManager.getActiveEntitlement(buyerId)) {
+            const renewRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('commerce_renew_plan').setLabel('Renovar Plano').setEmoji('🔄').setStyle(ButtonStyle.Primary)
             );
-            if (existingOrder) {
-                return interaction.reply({ content: `❌ Você já possui um pedido em andamento: <#${existingOrder.channel_id}>`, ephemeral: true });
-            }
-
-            const cartLimit = checkRateLimit(`commerce_cart:${buyerId}`, 10, 60 * 60 * 1000);
-            if (!cartLimit.allowed) {
-                return interaction.reply({ content: `❌ Muitos pedidos criados recentemente. Tente novamente em ${formatRetryAfter(cartLimit.retryAfterMs)}.`, ephemeral: true });
-            }
-
-            await interaction.reply({ content: '⏳ Criando seu pedido...', ephemeral: true });
-
-            let channel;
-            try {
-                const guild = interaction.guild;
-                const cfg = CommerceConfig.getConfig();
-                const permissionOverwrites = [
-                    { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-                    { id: buyerId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-                ];
-                if (cfg?.staff_role_id) {
-                    permissionOverwrites.push({ id: cfg.staff_role_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-                }
-
-                channel = await guild.channels.create({
-                    name: `pedido-${interaction.user.username}`.slice(0, 90),
-                    type: ChannelType.GuildText,
-                    parent: cfg?.public_category_id || undefined,
-                    permissionOverwrites,
-                });
-
-                const order = OrderManager.createOrder({ userId: buyerId, channelId: channel.id, guildId: guild.id });
-
-                const products = ProductCatalog.getPublishedProducts();
-                if (products.length === 0) {
-                    await channel.send('❌ Nenhum plano disponível no momento. Este canal será fechado em 10 segundos.');
-                    setTimeout(() => channel.delete().catch(() => {}), 10000);
-                    return interaction.editReply({ content: '❌ Nenhum plano disponível no momento.' });
-                }
-
-                const select = new StringSelectMenuBuilder()
-                    .setCustomId('commerce_select_product')
-                    .setPlaceholder('Selecione um plano...')
-                    .addOptions(products.slice(0, 25).map((p) => ({
-                        label: p.name,
-                        description: `${formatMoney(p.price)}/${billingPeriodLabel(p.billing_period)} | ${p.max_bots} bot(s) | ${p.max_ram}MB RAM`,
-                        value: p.id,
-                    })));
-                const row = new ActionRowBuilder().addComponents(select);
-                const cancelRow = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setCustomId('commerce_cancel_order').setLabel('Cancelar Pedido').setEmoji('❌').setStyle(ButtonStyle.Danger)
-                );
-
-                const embed = new EmbedBuilder()
-                    .setColor('#00AAFF')
-                    .setTitle('🛒 Seu Pedido')
-                    .setDescription(`Olá ${interaction.user}, selecione um plano abaixo pra continuar.`);
-
-                await channel.send({ content: `${interaction.user}`, embeds: [embed], components: [row, cancelRow] });
-                await interaction.editReply({ content: `✅ Pedido criado: ${channel}` });
-            } catch (err) {
-                console.error('❌ Erro ao criar pedido comercial:', err);
-                if (channel?.deletable) {
-                    try { await channel.delete('Erro ao criar pedido — limpeza automática'); } catch { /* ignora */ }
-                }
-                await interaction.editReply({ content: '❌ Erro ao criar seu pedido. Tente novamente ou avise a equipe de suporte.' });
-            }
-        } finally {
-            buyClaimLocks.delete(buyerId);
+            return interaction.reply({
+                content: '❌ Você já possui um plano ativo — não é possível comprar um novo. Use **Renovar Plano** abaixo.',
+                components: [renewRow],
+                ephemeral: true,
+            });
         }
-        return;
+
+        return createOrderChannel(interaction, buyerId);
+    }
+
+    if (customId === 'commerce_renew_plan') {
+        const buyerId = interaction.user.id;
+
+        // FASE 8: elegível = entitlement ativo OU expirado há pouco tempo
+        // (config.commerce.renewalGraceDays) — nunca renovação indefinida
+        // de um plano arbitrariamente antigo (EntitlementManager.
+        // getRenewalEligibleEntitlement já aplica essa janela).
+        const eligible = EntitlementManager.getRenewalEligibleEntitlement(buyerId);
+        if (!eligible) {
+            return interaction.reply({
+                content: '❌ Você não tem nenhum plano ativo ou elegível para renovação no momento. Use **Comprar Plano** para contratar um novo.',
+                ephemeral: true,
+            });
+        }
+
+        const previousOrder = get('SELECT product_snapshot FROM commerce_orders WHERE id = ?', [eligible.order_id]);
+        const previousName = previousOrder?.product_snapshot ? JSON.parse(previousOrder.product_snapshot).name : 'seu plano anterior';
+        const welcomeText = `Olá ${interaction.user}, você está renovando **${previousName}**. Selecione abaixo o plano desejado pra continuar (pode manter o mesmo ou escolher outro).`;
+
+        return createOrderChannel(interaction, buyerId, { renewalOfEntitlementId: eligible.id, welcomeText });
     }
 
     if (customId === 'commerce_select_product') {
@@ -298,7 +360,12 @@ async function handle(interaction, helpers = {}) {
         const productId = interaction.values[0];
         let updatedOrder;
         try {
-            updatedOrder = OrderManager.confirmProduct(order.id, productId);
+            // FASE 8: repassa `renewal_of_entitlement_id` (gravado na
+            // criação do Order — ver commerce_renew_plan/createOrderChannel)
+            // de volta pra confirmProduct(), que reescreve essa coluna a
+            // cada chamada (default null) — sem isso, confirmar o produto
+            // apagaria a intenção de renovação já registrada no pedido.
+            updatedOrder = OrderManager.confirmProduct(order.id, productId, order.renewal_of_entitlement_id || null);
             PaymentManager.createPaymentRecord(updatedOrder.id);
         } catch (err) {
             return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
@@ -307,7 +374,7 @@ async function handle(interaction, helpers = {}) {
         const snapshot = JSON.parse(updatedOrder.product_snapshot);
         const embed = new EmbedBuilder()
             .setColor('#00AAFF')
-            .setTitle('🧾 Resumo do Pedido')
+            .setTitle(updatedOrder.renewal_of_entitlement_id ? '🔄 Resumo da Renovação' : '🧾 Resumo do Pedido')
             .setDescription(
                 `**Plano:** \`${snapshot.name}\`\n` +
                 `**Valor:** \`${formatMoney(updatedOrder.total_price)}\`\n` +

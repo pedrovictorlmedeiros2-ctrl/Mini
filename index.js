@@ -101,7 +101,7 @@ const { startFailoverScheduler, stopFailoverScheduler } = require('./src/manager
 const { reconcileStuckIncidents } = require('./src/managers/security/IncidentResponseManager');
 const { computeReadiness, startReadinessMonitor, getReadinessState, STATUS: READINESS_STATUS } = require('./src/managers/serviceReadiness');
 const { startSecurityMonitor } = require('./src/managers/security/monitor/SecurityMonitor');
-const { reconcileStuckProvisioning } = require('./src/managers/commerce/CommerceScheduler');
+const { reconcileStuckProvisioning, startCommerceScheduler } = require('./src/managers/commerce/CommerceScheduler');
 
 // ── INICIALIZAÇÃO DO BANCO DE DADOS, CONSOLE E MONITORAMENTO ──────────────────
 initDatabase();
@@ -168,6 +168,12 @@ startScheduler();
 startMonitoring(); // Inicia monitoramento de recursos a cada 30s
 startMaintenanceScheduler();
 startFailoverScheduler();
+// FASE 8: liga as varreduras periódicas do sistema comercial (carrinho
+// expirado, aviso de expiração de entitlement, expiração de entitlement,
+// retenção de comprovantes) — existiam desde as Fases 2/5/8 mas nunca
+// eram chamadas em produção (achado da auditoria pré-implementação da
+// Fase 8; startCommerceScheduler() só era exercitado em teste isolado).
+startCommerceScheduler();
 setInterval(() => collectSystemMetrics(), 5 * 60 * 1000);
 startHealthEndpoint(process.env.HEALTH_PORT || 3001);
 // Multi-node worker agent (só sobe se NODE_ROLE=worker ou WORKER_PORT definido)

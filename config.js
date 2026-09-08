@@ -115,6 +115,14 @@ module.exports = {
         // indefinida"), valor default conservador até haver definição
         // jurídica/operacional formal.
         proofRetentionDays: parseInt(process.env.COMMERCE_PROOF_RETENTION_DAYS) || 180,
+        // Fase 8 (renovação self-service): janela de aviso ANTES do
+        // entitlement expirar (CommerceScheduler.sweepExpiringEntitlements())
+        // e janela de tolerância DEPOIS de já ter expirado, dentro da qual
+        // EntitlementManager.getRenewalEligibleEntitlement() ainda considera
+        // o plano elegível pra renovação self-service — depois disso, o
+        // cliente precisa comprar do zero (commerce_buy_plan normal).
+        renewalReminderDays: parseFloat(process.env.COMMERCE_RENEWAL_REMINDER_DAYS) || 3,
+        renewalGraceDays: parseFloat(process.env.COMMERCE_RENEWAL_GRACE_DAYS) || 14,
     },
 
     // ─── RECURSOS DO SISTEMA ───

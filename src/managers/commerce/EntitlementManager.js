@@ -39,6 +39,7 @@
 const { get, run, query } = require('../../database/database');
 const { recordAuditEvent } = require('../auditManager');
 const OrderManager = require('./OrderManager');
+const config = require('../../../config');
 
 const ENTITLEMENT_STATUS = Object.freeze({
     PENDING_PROVISIONING: 'pending_provisioning',
@@ -91,6 +92,45 @@ function getActiveEntitlement(userId) {
         throw new Error(`Violação de integridade: usuário ${userId} tem ${rows.length} entitlements 'active' simultâneos (esperado: no máximo 1).`);
     }
     return rows[0] || null;
+}
+
+/**
+ * Fase 8 — elegibilidade pra renovação self-service (`commerce_renew_plan`).
+ * Retorna o entitlement ATIVO do usuário se existir; senão, o entitlement
+ * 'expired' mais recente, mas SÓ se ainda estiver dentro da janela de
+ * tolerância `config.commerce.renewalGraceDays` a partir do `expires_at`
+ * real dele. Depois dessa janela, retorna null — o cliente precisa comprar
+ * do zero (`commerce_buy_plan`), nunca renovar um plano arbitrariamente
+ * antigo. Não concede nada, nem cria nada — só uma leitura de elegibilidade.
+ */
+function getRenewalEligibleEntitlement(userId) {
+    const active = getActiveEntitlement(userId);
+    if (active) return active;
+
+    const graceDays = config.commerce.renewalGraceDays;
+    const rows = query(
+        `SELECT * FROM commerce_entitlements
+         WHERE user_id = ? AND status = ? AND expires_at >= datetime('now', ?)
+         ORDER BY expires_at DESC LIMIT 1`,
+        [userId, ENTITLEMENT_STATUS.EXPIRED, `-${graceDays} days`]
+    );
+    return rows[0] || null;
+}
+
+/**
+ * Marca que o aviso de expiração próxima já foi enviado pra este
+ * entitlement — nunca reenviado no mesmo ciclo
+ * (CommerceScheduler.sweepExpiringEntitlements()). Idempotente (no-op se
+ * já estava marcado). Único lugar do sistema que escreve nesta coluna —
+ * mesmo princípio de escrita única já usado pro resto desta tabela.
+ */
+function markRenewalReminderSent(entitlementId) {
+    const entitlement = getEntitlement(entitlementId);
+    if (!entitlement) throw new Error(`Entitlement não encontrado: ${entitlementId}`);
+    if (entitlement.renewal_reminder_sent_at) return entitlement; // já marcado — no-op idempotente
+
+    run("UPDATE commerce_entitlements SET renewal_reminder_sent_at = datetime('now') WHERE id = ?", [entitlementId]);
+    return getEntitlement(entitlementId);
 }
 
 /**
@@ -242,6 +282,8 @@ module.exports = {
     getEntitlement,
     getEntitlementByOrder,
     getActiveEntitlement,
+    getRenewalEligibleEntitlement,
+    markRenewalReminderSent,
     grant,
     recomputeUserCapacity,
     expireEntitlement,
