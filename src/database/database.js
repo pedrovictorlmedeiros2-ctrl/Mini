@@ -305,6 +305,126 @@ function initDatabase() {
         )
     `);
 
+    // ═══════════════════════════════════════════════════════════════════
+    // SISTEMA COMERCIAL (Product → Order → Payment → Entitlement)
+    //
+    // Tabelas NOVAS e ISOLADAS do sistema de vendas legado (plans/orders/
+    // sales_config, definidos acima) — os dois convivem até uma fase futura
+    // substituir o legado. Prefixo `commerce_` evita qualquer colisão de
+    // nome com as tabelas já existentes (ex.: já existe uma tabela `orders`
+    // acima, do fluxo antigo — esta é `commerce_orders`, deliberadamente
+    // separada). `coupons` é a ÚNICA tabela reaproveitada como está, sem
+    // nenhuma coluna nova — arquitetura aprovada em
+    // COMMERCIAL_ARCHITECTURE_PROPOSAL.md.
+    // ═══════════════════════════════════════════════════════════════════
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS commerce_products (
+            id TEXT PRIMARY KEY,
+            guild_id TEXT,
+            name TEXT NOT NULL,
+            description TEXT,
+            price REAL NOT NULL,
+            max_bots INTEGER NOT NULL,
+            max_ram INTEGER NOT NULL,
+            max_cpu INTEGER NOT NULL,
+            storage INTEGER DEFAULT 1024,
+            billing_period TEXT NOT NULL DEFAULT 'monthly',
+            role_to_add TEXT,
+            role_to_remove TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    // product_snapshot: cópia JSON imutável do produto no momento em que o
+    // pedido sai de DRAFT — nunca mais lida de commerce_products depois
+    // disso (pedidos históricos nunca mudam com edições futuras do produto).
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS commerce_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT,
+            user_id TEXT NOT NULL,
+            channel_id TEXT UNIQUE NOT NULL,
+            product_id TEXT,
+            product_snapshot TEXT,
+            coupon_id INTEGER,
+            renewal_of_entitlement_id INTEGER,
+            original_price REAL,
+            discount_amount REAL DEFAULT 0,
+            total_price REAL,
+            status TEXT NOT NULL DEFAULT 'DRAFT',
+            rejection_reason TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (product_id) REFERENCES commerce_products(id),
+            FOREIGN KEY (coupon_id) REFERENCES coupons(id),
+            FOREIGN KEY (renewal_of_entitlement_id) REFERENCES commerce_entitlements(id)
+        )
+    `);
+
+    // Pix snapshotado (pix_key/name/city) no momento em que o pedido entra
+    // em AWAITING_PAYMENT — nunca lido ao vivo de sales_config depois disso,
+    // mesmo princípio de imutabilidade do product_snapshot acima.
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS commerce_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL UNIQUE,
+            method TEXT NOT NULL DEFAULT 'pix',
+            pix_key_snapshot TEXT,
+            pix_name_snapshot TEXT,
+            pix_city_snapshot TEXT,
+            expected_amount REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'awaiting_proof',
+            confirmed_by_admin_id TEXT,
+            confirmed_at DATETIME,
+            rejection_reason TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES commerce_orders(id),
+            FOREIGN KEY (confirmed_by_admin_id) REFERENCES users(id)
+        )
+    `);
+
+    // Um Entitlement por Order (inclusive renovação — nunca edita um
+    // entitlement existente). V1: no máximo UM entitlement com
+    // status='active' por usuário a qualquer momento (garantido em
+    // EntitlementManager.grant(), não só por convenção) — decisão de
+    // negócio confirmada, "múltiplos planos simultâneos" fica pra uma
+    // extensão futura explícita, não implementada aqui.
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS commerce_entitlements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT,
+            order_id INTEGER NOT NULL UNIQUE,
+            user_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending_provisioning',
+            activated_at DATETIME,
+            expires_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES commerce_orders(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    `);
+
+    // Permissão comercial independente de 'admin' (ROLE_HIERARCHY de
+    // userManager.js não é alterada) — soft-revoke (revoked_at) preserva
+    // histórico de quem teve o papel e quando, nunca DELETE.
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS commerce_staff (
+            user_id TEXT PRIMARY KEY,
+            guild_id TEXT,
+            granted_by TEXT NOT NULL,
+            granted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            revoked_by TEXT,
+            revoked_at DATETIME,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (granted_by) REFERENCES users(id),
+            FOREIGN KEY (revoked_by) REFERENCES users(id)
+        )
+    `);
+
     // INDICES
     db.exec(`CREATE INDEX IF NOT EXISTS idx_bots_creator ON bots(creator_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_bots_code ON bots(code)`);
@@ -324,6 +444,9 @@ function initDatabase() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_quarantine_bot ON quarantine_entries(bot_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_quarantine_incident ON quarantine_entries(incident_id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_orders_user_status ON commerce_orders(user_id, status)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_orders_status ON commerce_orders(status)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_commerce_entitlements_user_status ON commerce_entitlements(user_id, status)`);
 
     // CORREÇÃO (defesa em profundidade — race condition de porta): garante no
     // nível do banco que duas linhas nunca tenham a mesma porta não-nula, mesmo

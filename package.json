@@ -46,8 +46,16 @@
     "test:signalCollector": "node --test tests/signalCollector.test.js",
     "test:securityMonitor": "node --test tests/securityMonitor.test.js",
     "test:securityPhase2Adversarial": "node --test tests/securityPhase2Adversarial.test.js",
+    "test:commerceProductCatalog": "node --test tests/commerceProductCatalog.test.js",
+    "test:commerceOrderManager": "node --test tests/commerceOrderManager.test.js",
+    "test:commercePaymentManager": "node --test tests/commercePaymentManager.test.js",
+    "test:commerceEntitlementManager": "node --test tests/commerceEntitlementManager.test.js",
+    "test:commerceStaffManager": "node --test tests/commerceStaffManager.test.js",
+    "test:commerceCouponManager": "node --test tests/commerceCouponManager.test.js",
+    "test:commerceScheduler": "node --test tests/commerceScheduler.test.js",
+    "test:commercePhase2Adversarial": "node --test tests/commercePhase2Adversarial.test.js",
     "build:bot-images": "sh scripts/build-bot-images.sh",
-    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js tests/processSandboxBackend.test.js tests/sandboxManager.test.js tests/processManagerSandboxIntegration.test.js tests/networkManager.test.js tests/safeZipFolder.test.js tests/securityEngine.test.js tests/snapshotManager.test.js tests/quarantineManager.test.js tests/incidentResponseManager.test.js tests/maintenanceManager.test.js tests/instanceLock.test.js tests/serviceReadiness.test.js tests/serviceReadinessEnforcement.test.js tests/redactPayload.test.js tests/groqThreatAnalyzer.test.js tests/threatDecisionPolicy.test.js tests/signalCollector.test.js tests/securityMonitor.test.js tests/securityPhase2Adversarial.test.js"
+    "test:ci": "node --test tests/domains.test.js tests/prometheus.test.js tests/failover.test.js tests/fileManager.test.js tests/securityWrapper.test.js tests/consoleManager.test.js tests/sandboxCapabilityDetector.test.js tests/linuxSandboxBackend.test.js tests/processSandboxBackend.test.js tests/sandboxManager.test.js tests/processManagerSandboxIntegration.test.js tests/networkManager.test.js tests/safeZipFolder.test.js tests/securityEngine.test.js tests/snapshotManager.test.js tests/quarantineManager.test.js tests/incidentResponseManager.test.js tests/maintenanceManager.test.js tests/instanceLock.test.js tests/serviceReadiness.test.js tests/serviceReadinessEnforcement.test.js tests/redactPayload.test.js tests/groqThreatAnalyzer.test.js tests/threatDecisionPolicy.test.js tests/signalCollector.test.js tests/securityMonitor.test.js tests/securityPhase2Adversarial.test.js tests/commerceProductCatalog.test.js tests/commerceOrderManager.test.js tests/commercePaymentManager.test.js tests/commerceEntitlementManager.test.js tests/commerceStaffManager.test.js tests/commerceCouponManager.test.js tests/commerceScheduler.test.js tests/commercePhase2Adversarial.test.js"
   },
   "keywords": [
     "discord",

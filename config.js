@@ -93,6 +93,16 @@ module.exports = {
         },
     },
 
+    // ─── SISTEMA COMERCIAL (Product → Order → Payment → Entitlement) ───
+    // Ver COMMERCIAL_ARCHITECTURE_PROPOSAL.md. V1: um único servidor
+    // Discord, planos mensais, sem ProvisioningManager real ainda (fase
+    // de dados/regra de negócio — a interface com o Discord vem depois).
+    commerce: {
+        // Prazo padrão pra um carrinho expirar se o cliente nunca enviar
+        // comprovante (CommerceScheduler.sweepExpiredCarts()).
+        cartExpirationHours: parseFloat(process.env.COMMERCE_CART_EXPIRATION_HOURS) || 2,
+    },
+
     // ─── RECURSOS DO SISTEMA ───
     system: {
         botsFolder: './bots',
