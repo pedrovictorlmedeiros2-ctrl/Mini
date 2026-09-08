@@ -35,7 +35,7 @@ clientRef.setClient({
 });
 
 const { createBackup } = require('../src/managers/backupManager');
-const { handleCriticalIncident } = require('../src/managers/security/IncidentResponseManager');
+const { handleCriticalIncident, reconcileStuckIncidents } = require('../src/managers/security/IncidentResponseManager');
 
 let counter = 0;
 function makeBotWithFolder(label) {
@@ -178,4 +178,66 @@ test('CONCORRÊNCIA: dois sinais CRITICAL quase simultâneos pro MESMO bot resul
 
     const incidents = query('SELECT * FROM incidents WHERE bot_id = ?', [botId]);
     assert.equal(incidents.length, 1, 'duas chamadas quase simultâneas deveriam resultar em UM único incidente, não dois');
+});
+
+test('FAIL-SAFE: backup com checksum adulterado — restauração é bloqueada, FAILED_SAFE, e a quarentena original permanece a ÚNICA cópia íntegra', async () => {
+    const botId = makeBotWithFolder('tampered-checksum');
+    const folderPath = get('SELECT folder_path FROM bots WHERE id = ?', [botId]).folder_path;
+    fs.writeFileSync(path.join(folderPath, 'segredo-do-tenant.js'), 'conteudo-original-legitimo');
+
+    const backupResult = await createBackup(botId, 'manual');
+    const backupRow = get('SELECT * FROM backups WHERE bot_id = ? ORDER BY id DESC LIMIT 1', [botId]);
+
+    // Adultera o checksum registrado (simula um backup corrompido/adulterado
+    // — mesma proteção que já existe em backupManager.restoreBackup(),
+    // exercitada aqui dentro do fluxo do Kamikaze).
+    run('UPDATE backups SET checksum = ? WHERE id = ?', ['0000000000000000000000000000000000000000000000000000000000000000', backupRow.id]);
+
+    await handleCriticalIncident(botId, { source: 'test', code: 'platform_secret_path_blocked', details: {} });
+
+    const incident = get('SELECT * FROM incidents WHERE bot_id = ? ORDER BY id DESC LIMIT 1', [botId]);
+    assert.equal(incident.status, 'failed_safe', 'checksum adulterado deveria bloquear a restauração e terminar em failed_safe');
+    assert.ok(incident.snapshot_used_id, 'o snapshot foi localizado (existe), só a restauração dele que falhou');
+
+    // A quarentena do estado anterior à tentativa de restauração continua
+    // intacta — nada foi destruído por causa da falha.
+    const entry = get('SELECT * FROM quarantine_entries WHERE bot_id = ?', [botId]);
+    assert.ok(entry, 'a quarentena deveria existir');
+    assert.ok(fs.existsSync(path.join(entry.quarantine_path, 'segredo-do-tenant.js')), 'o conteúdo original preservado em quarentena não pode ter sido perdido');
+
+    // O arquivo de backup adulterado em si não foi apagado pela tentativa —
+    // continua no disco pra investigação/auditoria.
+    assert.ok(fs.existsSync(backupResult.path), 'o arquivo do backup (mesmo adulterado) não deveria ser apagado por uma falha de restauração');
+
+    const bot = get('SELECT * FROM bots WHERE id = ?', [botId]);
+    assert.equal(bot.suspended, 1);
+});
+
+test('RECONCILIAÇÃO NO BOOT: incidente preso num estado não-terminal (simulando queda do processo) é marcado failed_safe, nunca retomado às cegas', async () => {
+    const botId = makeBotWithFolder('stuck-incident');
+
+    // Simula um incidente que ficou "travado" no meio do processamento —
+    // exatamente o que aconteceria se o processo do Atlantic Host caísse
+    // entre duas etapas (o lock em memória se perde, mas a linha no banco
+    // continua com um status intermediário).
+    const stuckResult = run(
+        "INSERT INTO incidents (bot_id, severity, status, evidence_json) VALUES (?, 'CRITICAL', 'restoring', '{}')",
+        [botId]
+    );
+
+    await reconcileStuckIncidents();
+
+    const incident = get('SELECT * FROM incidents WHERE id = ?', [stuckResult.lastInsertRowid]);
+    assert.equal(incident.status, 'failed_safe', 'um incidente preso num estado não-terminal deveria ser marcado failed_safe na reconciliação do boot');
+    assert.ok(incident.resolved_at);
+
+    const bot = get('SELECT * FROM bots WHERE id = ?', [botId]);
+    assert.equal(bot.suspended, 1, 'o bot de um incidente reconciliado como failed_safe deveria permanecer suspenso');
+
+    // Reconciliar de novo (idempotência — ex: um segundo boot logo em
+    // seguida) não deveria fazer nada além do que já foi feito (não deveria
+    // reprocessar incidentes já terminais).
+    await reconcileStuckIncidents();
+    const incidentAfterSecondRun = get('SELECT * FROM incidents WHERE id = ?', [stuckResult.lastInsertRowid]);
+    assert.equal(incidentAfterSecondRun.status, 'failed_safe');
 });

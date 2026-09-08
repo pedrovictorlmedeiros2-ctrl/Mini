@@ -32,10 +32,27 @@ const activeIncidents = new Map();
 
 const TERMINAL_STATUSES = ['resolved', 'resolved_partial', 'failed_safe'];
 
+// Defesa em profundidade: reportSignal() (SecurityEngine.js) já sanitiza o
+// `details` de um sinal antes de repassar pra cá, mas handleCriticalIncident
+// é exportado e pode ser chamado diretamente (inclusive pelos próprios
+// testes) — nunca deve confiar só no chamador pra garantir que o payload é
+// serializável.
+function safeStringify(value) {
+    try {
+        return JSON.stringify(value);
+    } catch (err) {
+        try {
+            return JSON.stringify({ __unserializable: true, reason: err.message });
+        } catch {
+            return '{"__unserializable":true}';
+        }
+    }
+}
+
 function createIncidentRow(botId, severity, evidence) {
     const result = run(
         `INSERT INTO incidents (bot_id, severity, status, evidence_json) VALUES (?, ?, 'detected', ?)`,
-        [botId, severity, JSON.stringify(evidence)]
+        [botId, severity, safeStringify(evidence)]
     );
     return result.lastInsertRowid;
 }
@@ -112,24 +129,65 @@ async function handleCriticalIncident(botId, evidencePayload) {
         recordAuditEvent({
             userId: null,
             event: 'kamikaze:coalesced',
-            details: JSON.stringify({ botId, evidencePayload }),
+            details: safeStringify({ botId, evidencePayload }),
             severity: 'warning',
         });
         return;
     }
     activeIncidents.set(botId, true);
 
-    const incidentId = createIncidentRow(botId, 'CRITICAL', evidencePayload);
-
     try {
-        // ── CONTAINING ───────────────────────────────────────────────────
-        let bot = get('SELECT * FROM bots WHERE id = ?', [botId]);
+        // CORREÇÃO DE SEGURANÇA (achado em validação: "FOREIGN KEY constraint
+        // failed"): `incidents.bot_id` tem FK pra `bots(id)`. A versão
+        // anterior criava a linha de incidente ANTES de checar se o bot
+        // existe, e fazia isso FORA deste try/finally — resultado: um sinal
+        // CRITICAL pra um botId que não existe (ou que já foi apagado)
+        // lançava a violação de FK direto no INSERT, propagava pra fora da
+        // função sem passar pelo `finally`, e o lock em `activeIncidents`
+        // NUNCA era liberado — qualquer sinal legítimo futuro pro mesmo
+        // botId (inclusive depois de um bot de verdade ser criado com esse
+        // id) ficava coalescido/ignorado pra sempre, silenciosamente, até o
+        // processo reiniciar. Agora: valida o bot ANTES de tocar em
+        // `incidents`, e todo o corpo está dentro do try/finally — qualquer
+        // erro inesperado (inclusive um JSON.stringify que falhe no
+        // evidence_json) ainda libera o lock e ainda fica registrado no
+        // audit_log, nunca falha silenciosamente.
+        let bot;
+        try {
+            bot = get('SELECT * FROM bots WHERE id = ?', [botId]);
+        } catch (err) {
+            recordAuditEvent({
+                userId: null,
+                event: 'kamikaze:failed_safe',
+                details: safeStringify({ botId, reason: `erro ao consultar o bot no banco: ${err.message}`, evidencePayload }),
+                severity: 'critical',
+            });
+            return;
+        }
         if (!bot) {
-            auditStep(incidentId, botId, 'failed_safe', 'bot não encontrado no banco');
-            updateIncident(incidentId, { resolved_at: new Date().toISOString() });
+            recordAuditEvent({
+                userId: null,
+                event: 'kamikaze:failed_safe',
+                details: safeStringify({ botId, reason: 'bot não encontrado no banco — nenhum incidente foi criado (violaria a FK incidents.bot_id -> bots.id)', evidencePayload }),
+                severity: 'critical',
+            });
             return;
         }
 
+        let incidentId;
+        try {
+            incidentId = createIncidentRow(botId, 'CRITICAL', evidencePayload);
+        } catch (err) {
+            recordAuditEvent({
+                userId: null,
+                event: 'kamikaze:failed_safe',
+                details: JSON.stringify({ botId, reason: `falha ao registrar o incidente no banco: ${err.message}` }),
+                severity: 'critical',
+            });
+            return;
+        }
+
+        // ── CONTAINING ───────────────────────────────────────────────────
         // Suspende ANTES de qualquer outra coisa — bloqueia qualquer
         // startBot() concorrente (clique manual, auto-restart de crash
         // loop já em voo) enquanto o resto do fluxo roda.

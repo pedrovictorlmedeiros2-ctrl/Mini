@@ -59,6 +59,37 @@ const HARD_EVIDENCE_CODES = new Set(['platform_secret_path_blocked']);
 // permanente; isto é só o estado de trabalho da correlação).
 const signalHistory = new Map();
 
+/**
+ * CORREÇÃO DE SEGURANÇA (achado em validação): `details` vem de quem chama
+ * reportSignal() — código instrumentado em vários pontos do sistema
+ * (fileManager, processManager, monitorManager). Um valor não serializável
+ * (referência circular, BigInt, etc.) fazia o JSON.stringify() interno
+ * lançar TypeError direto de dentro do ponto único de ingestão de sinais
+ * de segurança — o pior lugar possível pra depender só de callers externos
+ * lembrarem de usar try/catch. Sanitiza uma vez, na entrada, em vez de
+ * confiar em cada chamador.
+ */
+function safeStringify(value) {
+    try {
+        return JSON.stringify(value);
+    } catch (err) {
+        try {
+            return JSON.stringify({ __unserializable: true, reason: err.message });
+        } catch {
+            return '{"__unserializable":true}';
+        }
+    }
+}
+
+function sanitizeDetails(details) {
+    try {
+        JSON.stringify(details);
+        return details;
+    } catch (err) {
+        return { __unserializable: true, reason: err.message };
+    }
+}
+
 function pruneOld(history, windowMs) {
     const cutoff = Date.now() - windowMs;
     while (history.length && history[0].ts < cutoff) history.shift();
@@ -125,6 +156,11 @@ function reportSignal({ botId, source, code, details = {} }) {
         throw new Error('SecurityEngine.reportSignal requer botId e code');
     }
 
+    // Sanitiza uma única vez, na entrada — tudo que segue (audit log e o
+    // evidencePayload repassado ao IncidentResponseManager) usa esta
+    // versão, garantida serializável.
+    const safeDetails = sanitizeDetails(details);
+
     const kamikazeEnabled = config.security.kamikaze.enabled;
 
     if (!kamikazeEnabled) {
@@ -134,7 +170,7 @@ function reportSignal({ botId, source, code, details = {} }) {
         recordAuditEvent({
             userId: null,
             event: `security_signal:${code}`,
-            details: JSON.stringify({ botId, source, details, note: 'kamikaze desabilitado — apenas registrado' }),
+            details: safeStringify({ botId, source, details: safeDetails, note: 'kamikaze desabilitado — apenas registrado' }),
             severity: 'info',
         });
         return { severity: SEVERITY.SUSPICIOUS, triggered: false };
@@ -145,7 +181,7 @@ function reportSignal({ botId, source, code, details = {} }) {
     recordAuditEvent({
         userId: null,
         event: `security_signal:${code}`,
-        details: JSON.stringify({ botId, source, details, rule: result.rule, severity: result.severity }),
+        details: safeStringify({ botId, source, details: safeDetails, rule: result.rule, severity: result.severity }),
         severity: result.severity.toLowerCase(),
     });
 
@@ -170,7 +206,7 @@ function reportSignal({ botId, source, code, details = {} }) {
         handleCriticalIncident(botId, {
             source,
             code,
-            details,
+            details: safeDetails,
             rule: result.rule,
             evidence: result.evidence,
         }).catch((err) => {
