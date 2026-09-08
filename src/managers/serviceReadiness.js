@@ -30,9 +30,14 @@ const { detectCapabilities } = require('./sandbox/capabilityDetector');
 
 const STATUS = Object.freeze({ READY: 'READY', DEGRADED: 'DEGRADED', BLOCKED: 'BLOCKED' });
 
+// Default de arranque é BLOCKED, de propósito — fail-closed: antes da
+// primeira computeReadiness() rodar de verdade (é assíncrona, chamada uma
+// vez no boot), NUNCA se assume READY por omissão. Uma janela pequena onde
+// o serviço nega provisionamento é sempre mais segura do que uma janela
+// (por menor que seja) onde ele libera sem ter checado nada ainda.
 let state = {
-    status: STATUS.READY,
-    blockedReasons: [],
+    status: STATUS.BLOCKED,
+    blockedReasons: ['Estado de prontidão ainda não verificado (aguardando a primeira computeReadiness() do boot).'],
     degradedReasons: [],
     checkedAt: null,
 };

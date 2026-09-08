@@ -99,6 +99,7 @@ const { startHealthEndpoint } = require('./src/managers/healthEndpoint');
 const { startWorkerAgent, stopWorkerAgent } = require('./src/managers/workerAgent');
 const { startFailoverScheduler, stopFailoverScheduler } = require('./src/managers/failoverManager');
 const { reconcileStuckIncidents } = require('./src/managers/security/IncidentResponseManager');
+const { computeReadiness, startReadinessMonitor, getReadinessState, STATUS: READINESS_STATUS } = require('./src/managers/serviceReadiness');
 
 // ── INICIALIZAÇÃO DO BANCO DE DADOS, CONSOLE E MONITORAMENTO ──────────────────
 initDatabase();
@@ -115,6 +116,27 @@ syncStatusOnStartup();
 reconcileStuckIncidents().catch((err) => {
     console.error('[Kamikaze] Falha na reconciliação de incidentes presos:', err.message);
 });
+
+// ── READINESS GATE ────────────────────────────────────────────────────────
+// Assíncrono e não-bloqueante (mesmo padrão do reconcileStuckIncidents()
+// acima) — enquanto não resolve, getReadinessState() reporta BLOCKED por
+// padrão (fail-closed, ver serviceReadiness.js), então nenhum startBot()/
+// installDependencies() concorrente nesse intervalo passaria despercebido
+// como se estivesse tudo certo. O bot de controle do Discord (login logo
+// abaixo) não depende disto — continua respondendo independente do estado.
+computeReadiness()
+    .then((result) => {
+        console.log(`[Readiness] Estado: ${result.status}` + (
+            result.status !== READINESS_STATUS.READY
+                ? ` — ${[...result.blockedReasons, ...result.degradedReasons].join(' | ')}`
+                : ''
+        ));
+        startReadinessMonitor();
+    })
+    .catch((err) => {
+        console.error('[Readiness] Falha ao calcular o estado inicial — permanece BLOCKED por segurança:', err.message);
+    });
+
 initConsole();
 startScheduler();
 startMonitoring(); // Inicia monitoramento de recursos a cada 30s

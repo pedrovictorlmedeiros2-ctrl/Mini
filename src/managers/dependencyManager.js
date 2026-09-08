@@ -74,6 +74,16 @@ function resolveNodePackageManager(folderPath) {
  * @returns {Promise<boolean>}
  */
 async function installDependencies(botId, folderPath) {
+    // OPERAÇÃO PERSISTENTE (readiness gate): instalar dependências já
+    // executa código de terceiros (scripts de install, mesmo com
+    // --ignore-scripts nem tudo é coberto — ver achado C4/C6 do
+    // SECURITY_AUDIT.md) fora de qualquer sandbox. Em produção BLOCKED
+    // (isolamento forte exigido e indisponível), nem esse passo roda —
+    // "nenhum provisionamento pode executar" vale também aqui, não só pra
+    // startBot(). Ver src/managers/serviceReadiness.js.
+    const { assertProvisioningAllowed } = require('./serviceReadiness');
+    assertProvisioningAllowed(`instalar dependências do bot ${botId}`);
+
     return addToQueue(async () => {
         const hasPackageJson = exists(path.join(folderPath, 'package.json'));
         const hasRequirements = exists(path.join(folderPath, 'requirements.txt'));

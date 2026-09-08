@@ -45,6 +45,16 @@ function restoreEnv() {
     }
 }
 
+test('FAIL-CLOSED: estado inicial (antes de qualquer computeReadiness()) é BLOCKED, nunca READY por omissão', () => {
+    // Precisa ser o PRIMEIRO teste do arquivo — getReadinessState() antes de
+    // qualquer chamada a computeReadiness() deve refletir o default seguro
+    // do módulo, não um valor otimista.
+    const state = getReadinessState();
+    assert.equal(state.status, STATUS.BLOCKED);
+    assert.ok(state.blockedReasons.length > 0);
+    assert.throws(() => assertProvisioningAllowed('teste'));
+});
+
 test('READY: diretórios graváveis, isolamento não exigido, webhook admin configurado', async () => {
     pointAllDirsTo(path.join(tmpRoot, 'ready-case'));
     process.env.REQUIRE_LINUX_SANDBOX = 'false';

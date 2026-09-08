@@ -363,6 +363,15 @@ function reportSecurityWrapperViolation(botId, text) {
  * @returns {ChildProcess} Processo iniciado
  */
 async function startBot(botId) {
+    // OPERAÇÃO PERSISTENTE (readiness gate): se o serviço está BLOCKED
+    // (isolamento Linux forte exigido em produção e indisponível, ou
+    // diretório essencial não gravável), nenhum bot hospedado pode iniciar
+    // — nunca cai silenciosamente pro backend reduzido pra compensar. O bot
+    // de controle do Discord continua respondendo normalmente; só isto (e
+    // installDependencies()) recusam. Ver src/managers/serviceReadiness.js.
+    const { assertProvisioningAllowed } = require('./serviceReadiness');
+    assertProvisioningAllowed(`iniciar o bot ${botId}`);
+
     const bot = get('SELECT * FROM bots WHERE id = ?', [botId]);
     if (!bot) throw new Error('Bot não encontrado');
 

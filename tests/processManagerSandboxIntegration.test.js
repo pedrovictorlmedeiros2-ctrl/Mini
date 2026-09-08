@@ -1,4 +1,5 @@
 const test = require('node:test');
+const { before } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -18,8 +19,26 @@ initDatabase();
 
 const { startBot, stopBot, activeProcesses } = require('../src/managers/processManager');
 const { detectCapabilities } = require('../src/managers/sandbox/capabilityDetector');
+const config = require('../config');
+const { computeReadiness } = require('../src/managers/serviceReadiness');
 
 run(`INSERT INTO users (id, username, role) VALUES ('creator-teste', 'lab-creator', 'client')`);
+
+// PRÉ-REQUISITO (readiness gate): startBot() agora recusa de cara se o
+// serviço estiver BLOCKED (default de arranque, fail-closed, ver
+// serviceReadiness.js) — sem isto, os testes abaixo nunca chegariam a
+// exercitar o fail-closed ESPECÍFICO do SandboxManager, que é o que este
+// arquivo testa. Aponta os diretórios pra um tmp gravável e desliga a
+// exigência de isolamento forte (REQUIRE_LINUX_SANDBOX=false) só pra não
+// confundir o gate de SERVIÇO com o fail-closed POR BOT que já é o
+// assunto deste arquivo.
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'atlantic-pmintegration-readiness-'));
+config.system.botsFolder = path.join(tmpRoot, 'bots');
+config.system.backupsFolder = path.join(tmpRoot, 'backups');
+config.system.quarantineFolder = path.join(tmpRoot, 'quarantine');
+config.system.logsFolder = path.join(tmpRoot, 'logs');
+process.env.REQUIRE_LINUX_SANDBOX = 'false';
+before(async () => { await computeReadiness(); });
 
 function makeBotFolder() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-sandbox-integration-'));
