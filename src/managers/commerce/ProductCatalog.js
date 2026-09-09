@@ -103,6 +103,15 @@ function saveProduct(productData) {
     if (!VALID_BILLING_PERIODS.has(billingPeriod)) {
         throw new Error(`billingPeriod inválido: "${billingPeriod}". Válidos na v1: ${[...VALID_BILLING_PERIODS].join(', ')}.`);
     }
+    // FASE 10 (correção de bug real, defesa em profundidade — mesmo
+    // princípio já usado pra `price` acima e pro teto do host na Fase 9):
+    // nunca aceita capacidade negativa, não importa quem chama
+    // saveProduct() — a validação do modal (commerce.js) é só a primeira
+    // camada, esta é a que garante que NENHUM caminho (UI, script, teste)
+    // consegue persistir um produto com specs negativas.
+    if (![maxBots, maxRam, maxCpu].every((v) => Number.isFinite(v) && v >= 0)) {
+        throw new Error('ProductCatalog.saveProduct requer maxBots/maxRam/maxCpu numéricos válidos e nunca negativos.');
+    }
     assertWithinHostCaps({ maxBots, maxRam, maxCpu });
 
     const existing = getProduct(id);

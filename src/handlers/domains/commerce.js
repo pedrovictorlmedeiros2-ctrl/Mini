@@ -537,7 +537,17 @@ async function handle(interaction, helpers = {}) {
 
     if (customId === 'commerce_cancel_order') {
         const order = OrderManager.getOrderByChannel(interaction.channelId);
-        if (order && order.user_id === interaction.user.id) {
+        // FASE 10 (correção de bug real): se o pedido existe e pertence a
+        // OUTRO usuário, interrompe imediatamente — nunca chama
+        // cancelOrder(), nunca responde "Pedido cancelado", nunca agenda
+        // exclusão do canal. Antes desta correção, esse caminho caía
+        // direto no bloco de sucesso abaixo (só pulava o cancelOrder()),
+        // apagando o canal de um pedido que continuava vivo no banco —
+        // um efeito parcial real (canal apagado, pedido nunca cancelado).
+        if (order && order.user_id !== interaction.user.id) {
+            return interaction.reply({ content: '❌ Este pedido não é seu.', ephemeral: true });
+        }
+        if (order) {
             try {
                 OrderManager.cancelOrder(order.id);
             } catch (err) {
@@ -910,8 +920,17 @@ async function handle(interaction, helpers = {}) {
         const [maxBots, maxRam, maxCpu] = interaction.fields.getTextInputValue('resources').split(',').map((v) => parseInt(v.trim(), 10));
         const description = interaction.fields.getTextInputValue('description') || null;
 
-        if (!Number.isFinite(price) || price < 0 || ![maxBots, maxRam, maxCpu].every(Number.isFinite)) {
-            return interaction.reply({ content: '❌ Valores inválidos — confira preço e recursos (formato: bots,ram,cpu).', ephemeral: true });
+        // FASE 10 (correção de bug real): antes, só validava
+        // Number.isFinite — um valor negativo (ex.: "-5,512,40") passava
+        // essa checagem e seguia pra saveProduct(), que só rejeita specs
+        // ACIMA do teto do host (Fase 9), nunca abaixo de zero. Um produto
+        // com capacidade negativa salvava normalmente e, numa venda real,
+        // escreveria users.max_bots/max_ram/max_cpu negativos.
+        if (
+            !Number.isFinite(price) || price < 0
+            || ![maxBots, maxRam, maxCpu].every((v) => Number.isFinite(v) && v >= 0)
+        ) {
+            return interaction.reply({ content: '❌ Valores inválidos — preço e recursos (bots, RAM, CPU) precisam ser números válidos e nunca negativos.', ephemeral: true });
         }
 
         try {
