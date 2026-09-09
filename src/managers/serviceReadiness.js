@@ -27,6 +27,8 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../../config');
 const { detectCapabilities } = require('./sandbox/capabilityDetector');
+const alertManager = require('./alertManager');
+const clientRef = require('../utils/clientRef');
 
 const STATUS = Object.freeze({ READY: 'READY', DEGRADED: 'DEGRADED', BLOCKED: 'BLOCKED' });
 
@@ -43,6 +45,71 @@ let state = {
 };
 
 let recheckTimer = null;
+
+/**
+ * FASE 9 (hardening): alerta proativo em mudança de estado — antes disso,
+ * uma transição pra BLOCKED/DEGRADED só aparecia em console.warn(), então
+ * o serviço podia parar de provisionar (assertProvisioningAllowed()) sem
+ * NINGUÉM ser avisado até alguém notar manualmente.
+ *
+ * Manda pros DOIS canais quando disponíveis (webhook `sendAlert()` E DM
+ * `tryDM()` pro owner do painel) — nunca um com fallback pro outro,
+ * porque o motivo mais comum de DEGRADED hoje é justamente
+ * LOG_WEBHOOK_URL ausente: um alerta que dependesse só do webhook nunca
+ * avisaria sobre a falta do próprio webhook. Cada canal tem seu próprio
+ * try/catch — a falha de um nunca impede o outro, e nenhum dos dois pode
+ * nunca propagar pra fora (chamado de dentro de computeReadiness(), que
+ * precisa continuar funcionando mesmo com Discord/webhook fora do ar).
+ *
+ * Nunca alerta se o status não mudou (evita spam a cada recheck
+ * periódico) nem no primeiro computeReadiness() da vida do processo se o
+ * resultado for READY (primeiro check bem-sucedido não é notícia — mas
+ * um primeiro check revelando DEGRADED/BLOCKED É, por isso alerta nesse
+ * caso mesmo sendo "o primeiro").
+ */
+function maybeAlertReadinessChange(previous, next) {
+    // O placeholder de arranque também tem status BLOCKED (fail-closed) —
+    // por isso "é a primeira checagem de verdade" só pode ser decidido
+    // por `checkedAt === null`, NUNCA por comparar `status`: se comparasse
+    // por status, um primeiro computeReadiness() que realmente resultasse
+    // em BLOCKED seria mascarado como "sem mudança" (placeholder BLOCKED
+    // === resultado real BLOCKED) e nunca alertaria — exatamente o oposto
+    // do que "primeiro check revelando um problema real" deveria fazer.
+    const isFirstRealCheck = previous.checkedAt === null;
+    if (isFirstRealCheck) {
+        if (next.status === STATUS.READY) return; // primeiro check bem-sucedido não é notícia
+    } else if (previous.status === next.status) {
+        return; // sem mudança de verdade (nunca do placeholder) — evita spam
+    }
+
+    const severityByStatus = { READY: 'success', DEGRADED: 'warning', BLOCKED: 'error' };
+    const reasons = [...next.blockedReasons, ...next.degradedReasons];
+    const title = `[Atlantic Host] Prontidão do serviço: ${previous.status} → ${next.status}`;
+    const message = reasons.length ? reasons.join('\n') : 'Nenhum motivo listado (READY).';
+
+    console.warn(`[ServiceReadiness] Estado mudou de ${previous.status} para ${next.status}.`, next);
+
+    // sendAlert()/tryDM() já nunca lançam nem rejeitam por si (ambos têm
+    // seu próprio try/catch interno) — o try/catch síncrono aqui e o
+    // .catch() na Promise são só defesa em profundidade, pra nunca
+    // depender disso continuar verdade nessas duas funções pra sempre.
+    try {
+        Promise.resolve(alertManager.sendAlert(title, message, severityByStatus[next.status] || 'info'))
+            .catch((err) => console.error('[ServiceReadiness] Falha ao enviar alerta via webhook:', err.message));
+    } catch (err) {
+        console.error('[ServiceReadiness] Falha ao enviar alerta via webhook:', err.message);
+    }
+
+    try {
+        const ownerId = config.bot && config.bot.ownerId;
+        if (ownerId) {
+            Promise.resolve(clientRef.tryDM(ownerId, `⚠️ **${title}**\n${message}`))
+                .catch((err) => console.error('[ServiceReadiness] Falha ao tentar DM de alerta ao owner:', err.message));
+        }
+    } catch (err) {
+        console.error('[ServiceReadiness] Falha ao tentar DM de alerta ao owner:', err.message);
+    }
+}
 
 /**
  * Produção exige isolamento forte por padrão (NODE_ENV=production). Pode
@@ -161,7 +228,9 @@ async function computeReadiness() {
     if (blockedReasons.length) status = STATUS.BLOCKED;
     else if (degradedReasons.length) status = STATUS.DEGRADED;
 
+    const previous = state;
     state = { status, blockedReasons, degradedReasons, checkedAt: new Date().toISOString() };
+    maybeAlertReadinessChange(previous, state);
     return state;
 }
 
@@ -187,22 +256,19 @@ function assertProvisioningAllowed(action = 'operação de provisionamento') {
 }
 
 /**
- * Recalcula periodicamente (não em cada request) e loga quando o status
- * MUDA — útil operacionalmente (ex: notar que o host virou BLOCKED depois
- * de uma falha de disco, ou que voltou a READY depois de corrigido).
+ * Recalcula periodicamente (não em cada request) — a detecção de mudança
+ * de estado e o alerta (log + webhook + DM) vivem dentro de
+ * computeReadiness()/maybeAlertReadinessChange(), pra cobrir tanto este
+ * recheck periódico quanto a primeira chamada feita no boot (antes deste
+ * monitor sequer existir) com a mesma lógica, num único lugar.
  */
 function startReadinessMonitor(intervalMs = 5 * 60 * 1000) {
     if (recheckTimer) clearInterval(recheckTimer);
     recheckTimer = setInterval(async () => {
-        const previousStatus = state.status;
         try {
             await computeReadiness();
         } catch (err) {
             console.error('[ServiceReadiness] Falha ao recalcular o estado:', err.message);
-            return;
-        }
-        if (state.status !== previousStatus) {
-            console.warn(`[ServiceReadiness] Estado mudou de ${previousStatus} para ${state.status}.`, state);
         }
     }, intervalMs);
     if (recheckTimer.unref) recheckTimer.unref();
@@ -223,4 +289,5 @@ module.exports = {
     isProductionIsolationRequired,
     startReadinessMonitor,
     stopReadinessMonitor,
+    _maybeAlertReadinessChange: maybeAlertReadinessChange,
 };

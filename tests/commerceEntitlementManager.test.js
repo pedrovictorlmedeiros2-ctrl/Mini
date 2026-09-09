@@ -17,6 +17,7 @@ const config = require('../config');
 const ProductCatalog = require('../src/managers/commerce/ProductCatalog');
 const OrderManager = require('../src/managers/commerce/OrderManager');
 const EntitlementManager = require('../src/managers/commerce/EntitlementManager');
+const capacityManager = require('../src/managers/capacityManager');
 
 let counter = 0;
 function makeUser() {
@@ -25,13 +26,23 @@ function makeUser() {
     run("INSERT INTO users (id, username, role) VALUES (?, ?, ?)", [userId, 'tester', 'client']);
     return userId;
 }
+// FASE 9: grava direto via SQL, contornando ProductCatalog.saveProduct()/
+// publishProduct() — desde a Fase 9 os dois rejeitam specs acima do teto
+// do host (ver commerceProductCatalog.test.js), mas alguns testes deste
+// arquivo (ex.: "grant nunca concede mais que o teto") testam uma camada
+// diferente de propósito: capacityManager clampando na ESCRITA mesmo que
+// o snapshot do produto peça mais — não importa como o produto passou a
+// existir com specs assim, só a garantia de escrita.
 function makeProduct(overrides = {}) {
     counter += 1;
-    const product = ProductCatalog.saveProduct({
-        id: `emtest-prod-${counter}`, name: 'Plano', price: 39.9,
-        maxBots: 3, maxRam: 512, maxCpu: 40, ...overrides,
-    });
-    return ProductCatalog.publishProduct(product.id);
+    const spec = { maxBots: 3, maxRam: 512, maxCpu: 40, ...overrides };
+    const productId = `emtest-prod-${counter}`;
+    run(
+        `INSERT INTO commerce_products (id, name, price, max_bots, max_ram, max_cpu, storage, billing_period, status)
+         VALUES (?, 'Plano', 39.9, ?, ?, ?, 1024, 'monthly', 'published')`,
+        [productId, spec.maxBots, spec.maxRam, spec.maxCpu]
+    );
+    return ProductCatalog.getProduct(productId);
 }
 /** Cria um pedido e o leva até PROVISIONING — ponto onde grant() pode ser chamado. */
 function makeOrderInProvisioning(userId, { productOverrides = {}, renewalOfEntitlementId = null } = {}) {
@@ -278,4 +289,138 @@ test('revokeEntitlement: idempotente, sempre auditável (motivo registrado)', ()
     const revoked = EntitlementManager.revokeEntitlement(entitlement.id, 'admin-y', 'fraude suspeita');
     assert.equal(revoked.status, 'revoked');
     assert.doesNotThrow(() => EntitlementManager.revokeEntitlement(entitlement.id, 'admin-y', 'fraude suspeita'));
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// FASE 9 (correção de C1 — "entitlement fantasma"): PENDING_PROVISIONING
+// como estado intermediário obrigatório antes de ACTIVE.
+// ═══════════════════════════════════════════════════════════════════════
+
+test('C1 — 1) grant() normal: capacidade aplicada com sucesso -> ACTIVE diretamente (sem regressão no caminho feliz)', () => {
+    const userId = makeUser();
+    const order = makeOrderInProvisioning(userId, { productOverrides: { maxBots: 4, maxRam: 400, maxCpu: 35 } });
+
+    const entitlement = EntitlementManager.grant(order.id);
+
+    assert.equal(entitlement.status, EntitlementManager.ENTITLEMENT_STATUS.ACTIVE);
+    const user = get('SELECT * FROM users WHERE id = ?', [userId]);
+    assert.equal(user.max_bots, 4);
+    assert.equal(user.max_ram, 400);
+    assert.equal(user.max_cpu, 35);
+});
+
+test('C1 — 2) falha em writeUserCapacity() durante grant(): entitlement fica PENDING_PROVISIONING, NUNCA ACTIVE, capacidade nunca é escrita', () => {
+    const userId = makeUser();
+    const order = makeOrderInProvisioning(userId, { productOverrides: { maxBots: 6, maxRam: 600, maxCpu: 50 } });
+
+    const originalWrite = capacityManager.writeUserCapacity;
+    capacityManager.writeUserCapacity = () => { throw new Error('falha simulada na escrita de capacidade'); };
+    try {
+        assert.throws(() => EntitlementManager.grant(order.id), /falha simulada/);
+    } finally {
+        capacityManager.writeUserCapacity = originalWrite;
+    }
+
+    const entitlement = EntitlementManager.getEntitlementByOrder(order.id);
+    assert.ok(entitlement, 'a linha precisa existir (foi criada antes da falha)');
+    assert.equal(entitlement.status, EntitlementManager.ENTITLEMENT_STATUS.PENDING_PROVISIONING, 'NUNCA deveria ter sido promovida a ACTIVE');
+
+    const user = get('SELECT * FROM users WHERE id = ?', [userId]);
+    assert.notEqual(user.max_bots, 6, 'a capacidade do produto nunca deveria ter sido aplicada');
+});
+
+test('C1 — 3) e 4) retry após a causa da falha desaparecer: promove a MESMA linha para ACTIVE, nunca cria uma segunda', () => {
+    const userId = makeUser();
+    const order = makeOrderInProvisioning(userId, { productOverrides: { maxBots: 6, maxRam: 600, maxCpu: 50 } });
+
+    const originalWrite = capacityManager.writeUserCapacity;
+    capacityManager.writeUserCapacity = () => { throw new Error('falha simulada, primeira tentativa'); };
+    try {
+        assert.throws(() => EntitlementManager.grant(order.id));
+    } finally {
+        capacityManager.writeUserCapacity = originalWrite; // causa da falha "desaparece"
+    }
+
+    const pending = EntitlementManager.getEntitlementByOrder(order.id);
+    assert.equal(pending.status, EntitlementManager.ENTITLEMENT_STATUS.PENDING_PROVISIONING);
+
+    const retried = EntitlementManager.grant(order.id); // retry real
+
+    assert.equal(retried.id, pending.id, 'precisa ser a MESMA linha (mesmo id), nunca uma nova');
+    assert.equal(retried.status, EntitlementManager.ENTITLEMENT_STATUS.ACTIVE);
+    const allForOrder = require('../src/database/database').query('SELECT * FROM commerce_entitlements WHERE order_id = ?', [order.id]);
+    assert.equal(allForOrder.length, 1, 'nunca deveria existir uma segunda linha pro mesmo pedido');
+
+    const user = get('SELECT * FROM users WHERE id = ?', [userId]);
+    assert.equal(user.max_bots, 6, 'a capacidade real É aplicada no retry, depois que a causa da falha desaparece');
+});
+
+test('C1 — 5) e 6) outro entitlement do MESMO usuário fica ACTIVE antes do retry: retry NUNCA promove o pending, nunca existem dois ACTIVE', () => {
+    const userId = makeUser();
+    const orderA = makeOrderInProvisioning(userId, { productOverrides: { maxBots: 6, maxRam: 600, maxCpu: 50 } });
+
+    const originalWrite = capacityManager.writeUserCapacity;
+    capacityManager.writeUserCapacity = () => { throw new Error('falha simulada'); };
+    try {
+        assert.throws(() => EntitlementManager.grant(orderA.id));
+    } finally {
+        capacityManager.writeUserCapacity = originalWrite;
+    }
+    const pendingA = EntitlementManager.getEntitlementByOrder(orderA.id);
+    assert.equal(pendingA.status, EntitlementManager.ENTITLEMENT_STATUS.PENDING_PROVISIONING);
+
+    // Enquanto orderA está preso PENDING_PROVISIONING, uma compra
+    // completamente diferente do MESMO usuário é concedida normalmente
+    // (getActiveEntitlement() não vê o pending, então isto não é
+    // bloqueado — comportamento correto e já esperado).
+    const orderB = makeOrderInProvisioning(userId, { productOverrides: { maxBots: 2, maxRam: 200, maxCpu: 20 } });
+    const entitlementB = EntitlementManager.grant(orderB.id);
+    assert.equal(entitlementB.status, EntitlementManager.ENTITLEMENT_STATUS.ACTIVE);
+
+    // Agora o retry de orderA (a causa original da falha já não existe
+    // mais) — NUNCA deveria promover o pending, porque isso criaria um
+    // segundo ACTIVE simultâneo pro mesmo usuário.
+    assert.throws(() => EntitlementManager.grant(orderA.id), EntitlementManager.EntitlementConflictError);
+
+    const pendingAAfter = EntitlementManager.getEntitlementByOrder(orderA.id);
+    assert.equal(pendingAAfter.status, EntitlementManager.ENTITLEMENT_STATUS.PENDING_PROVISIONING, 'nunca promovida — a exclusividade venceu');
+
+    const activeRows = require('../src/database/database').query(
+        "SELECT id FROM commerce_entitlements WHERE user_id = ? AND status = 'active'", [userId]
+    );
+    assert.equal(activeRows.length, 1, 'nunca dois ACTIVE simultâneos — só o entitlement B');
+    assert.equal(activeRows[0].id, entitlementB.id);
+});
+
+test('C1: retomada nunca refaz o fechamento do entitlement antigo numa renovação (idempotente por natureza, mas confirmado explicitamente)', () => {
+    const userId = makeUser();
+    const orderOriginal = makeOrderInProvisioning(userId, { productOverrides: { maxBots: 3, maxRam: 300, maxCpu: 25 } });
+    const original = EntitlementManager.grant(orderOriginal.id);
+
+    const orderRenewal = makeOrderInProvisioning(userId, {
+        productOverrides: { maxBots: 5, maxRam: 500, maxCpu: 45 },
+        renewalOfEntitlementId: original.id,
+    });
+
+    const originalWrite = capacityManager.writeUserCapacity;
+    capacityManager.writeUserCapacity = () => { throw new Error('falha simulada na renovação'); };
+    try {
+        assert.throws(() => EntitlementManager.grant(orderRenewal.id));
+    } finally {
+        capacityManager.writeUserCapacity = originalWrite;
+    }
+
+    // O antigo já foi fechado na tentativa original (antes da falha) —
+    // continua 'expired', nunca reaberto por engano.
+    assert.equal(EntitlementManager.getEntitlement(original.id).status, EntitlementManager.ENTITLEMENT_STATUS.EXPIRED);
+
+    const retried = EntitlementManager.grant(orderRenewal.id);
+    assert.equal(retried.status, EntitlementManager.ENTITLEMENT_STATUS.ACTIVE);
+    assert.equal(EntitlementManager.getEntitlement(original.id).status, EntitlementManager.ENTITLEMENT_STATUS.EXPIRED, 'continua expired, nunca reaberto');
+
+    const activeRows = require('../src/database/database').query(
+        "SELECT id FROM commerce_entitlements WHERE user_id = ? AND status = 'active'", [userId]
+    );
+    assert.equal(activeRows.length, 1);
+    assert.equal(activeRows[0].id, retried.id);
 });

@@ -25,6 +25,8 @@ const { get, run, query } = require('../../database/database');
 const config = require('../../../config');
 const { hasPermission, registerUser } = require('../../managers/userManager');
 const { checkRateLimit, formatRetryAfter } = require('../../utils/rateLimiter');
+const alertManager = require('../../managers/alertManager');
+const clientRef = require('../../utils/clientRef');
 
 const ProductCatalog = require('../../managers/commerce/ProductCatalog');
 const OrderManager = require('../../managers/commerce/OrderManager');
@@ -71,6 +73,37 @@ function formatMoney(value) {
     return `R$ ${Number(value).toFixed(2)}`;
 }
 
+/**
+ * FASE 9 (P1-4): monta a descrição de uma listagem do staff (fila de
+ * revisão, falhas de provisionamento) SEM NUNCA ultrapassar o limite de
+ * `description` de um embed do Discord (4096 caracteres) — não importa
+ * o tamanho do backlog nem o comprimento de cada linha (nome de usuário
+ * longo, etc.). Acumula linha por linha até chegar perto do limite
+ * (margem de segurança pra caber a nota final), então para e resume o
+ * resto — nunca corta uma linha no meio. A ORDEM da lista de entrada
+ * nunca é alterada aqui (ambas as queries já ordenam os mais antigos
+ * primeiro — são os que precisam de atenção primeiro, e são eles que
+ * ficam garantidos visíveis).
+ */
+function buildTruncatedList(items, formatLineFn, maxChars = 3900) {
+    const lines = [];
+    let usedChars = 0;
+    let shownCount = 0;
+    for (const item of items) {
+        const line = formatLineFn(item);
+        const addedChars = line.length + 1; // +1 pela quebra de linha
+        if (usedChars + addedChars > maxChars) break;
+        lines.push(line);
+        usedChars += addedChars;
+        shownCount += 1;
+    }
+    const remaining = items.length - shownCount;
+    if (remaining > 0) {
+        lines.push(`… e mais ${remaining} pedido(s) não exibido(s) aqui — resolva os mais antigos (acima) primeiro.`);
+    }
+    return { text: lines.join('\n'), shownCount, totalCount: items.length };
+}
+
 function billingPeriodLabel(period) {
     return period === 'monthly' ? 'mês' : (period || 'mês');
 }
@@ -98,6 +131,30 @@ async function postToChannel(guild, channelId, payload) {
     if (!channelId) return;
     const channel = guild.channels.cache.get(channelId);
     if (channel) await channel.send(payload).catch(() => {});
+}
+
+/**
+ * FASE 9 (P1-2): usada só pras notificações que não podem desaparecer em
+ * silêncio (falha de provisionamento) — se `sales_log_channel_id` não
+ * estiver configurado, `postToChannel()` seria um no-op sem nenhum outro
+ * sinal. Cai pro mesmo mecanismo de alerta administrativo do P0-2
+ * (`alertManager.sendAlert()` webhook + `clientRef.tryDM()` ao owner) —
+ * nunca um mecanismo novo. Nunca lança (mesmo princípio fail-safe de
+ * `notifyBuyer()`/`postToChannel()`).
+ */
+async function notifyStaffOfImportantFailure(guild, channelId, content) {
+    if (channelId) {
+        await postToChannel(guild, channelId, { content });
+        return;
+    }
+    try {
+        await alertManager.sendAlert('[Atlantic Host] Falha comercial sem canal de log configurado', content, 'error');
+    } catch { /* nunca bloqueia */ }
+    try {
+        if (config.bot && config.bot.ownerId) {
+            await clientRef.tryDM(config.bot.ownerId, `🚨 **Canal de logs de vendas não configurado.**\n${content}`);
+        }
+    } catch { /* nunca bloqueia */ }
 }
 
 /**
@@ -239,7 +296,14 @@ async function publishStaffPanel(interaction) {
         new ButtonBuilder().setCustomId('commerce_admin_stats').setLabel('Estatísticas').setEmoji('📈').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('commerce_admin_audit').setLabel('Auditoria').setEmoji('🧾').setStyle(ButtonStyle.Secondary)
     );
-    await interaction.reply({ embeds: [embed], components: [row1, row2] });
+    // FASE 9: nunca deixa uma configuração incompleta passar em silêncio
+    // no momento em que o painel é publicado (é aqui que o admin fica
+    // sabendo, não só quando uma falha real acontecer meses depois).
+    const missingFields = CommerceConfig.getMissingCriticalFields();
+    const warning = missingFields.includes('sales_log_channel_id')
+        ? '\n\n⚠️ **Canal de logs de vendas não configurado** — falhas de provisionamento não serão notificadas nesse canal (só via alerta administrativo, se configurado). Rode `/configurar-loja` de novo pra reparar.'
+        : '';
+    await interaction.reply({ embeds: [embed.setDescription(embed.data.description + warning)], components: [row1, row2] });
 }
 
 async function handle(interaction, helpers = {}) {
@@ -500,10 +564,13 @@ async function handle(interaction, helpers = {}) {
         if (pending.length === 0) {
             return interaction.reply({ content: '✅ Nenhum pedido aguardando análise no momento.', ephemeral: true });
         }
+        const { text: pendingDescription } = buildTruncatedList(
+            pending, (o) => `🔹 **#${o.id}** — \`${o.username}\` — \`${formatMoney(o.total_price)}\` (${o.status})`
+        );
         const embed = new EmbedBuilder()
             .setColor('#FFFF00')
             .setTitle('📋 Pedidos em Análise')
-            .setDescription(pending.map((o) => `🔹 **#${o.id}** — \`${o.username}\` — \`${formatMoney(o.total_price)}\` (${o.status})`).join('\n'));
+            .setDescription(pendingDescription);
         const select = new StringSelectMenuBuilder()
             .setCustomId('commerce_staff_select_order')
             .setPlaceholder('Selecione um pedido...')
@@ -626,9 +693,10 @@ async function handle(interaction, helpers = {}) {
             );
         }).catch(async (err) => {
             const cfg2 = CommerceConfig.getConfig();
-            await postToChannel(interaction.guild, cfg2?.sales_log_channel_id, {
-                content: `🚨 **Falha no provisionamento automático** do pedido #${order.id}: ${err.message}\nRequer retry manual — veja "Falhas de Provisionamento" no painel comercial.`,
-            });
+            await notifyStaffOfImportantFailure(
+                interaction.guild, cfg2?.sales_log_channel_id,
+                `🚨 **Falha no provisionamento automático** do pedido #${order.id}: ${err.message}\nRequer retry manual — veja "Falhas de Provisionamento" no painel comercial.`
+            );
             await notifyBuyer(
                 interaction.client, order.user_id,
                 `⚠️ **Houve um problema técnico ao ativar seu plano** (Pedido #${order.id}).\n\n` +
@@ -750,10 +818,13 @@ async function handle(interaction, helpers = {}) {
         if (failed.length === 0) {
             return interaction.reply({ content: '✅ Nenhuma falha de provisionamento pendente no momento.', ephemeral: true });
         }
+        const { text: failedDescription } = buildTruncatedList(
+            failed, (o) => `🔹 **#${o.id}** — \`${o.username}\` — \`${formatMoney(o.total_price)}\``
+        );
         const embed = new EmbedBuilder()
             .setColor('#FF5555')
             .setTitle('🚨 Falhas de Provisionamento')
-            .setDescription(failed.map((o) => `🔹 **#${o.id}** — \`${o.username}\` — \`${formatMoney(o.total_price)}\``).join('\n'));
+            .setDescription(failedDescription);
         const buttons = failed.slice(0, 5).map((o) =>
             new ButtonBuilder().setCustomId(`commerce_staff_retry_provisioning_${o.id}`).setLabel(`Retry #${o.id}`).setEmoji('🔄').setStyle(ButtonStyle.Primary)
         );

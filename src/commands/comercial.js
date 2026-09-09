@@ -20,6 +20,33 @@ module.exports = [
 
             if (CommerceConfig.isConfigured()) {
                 const cfg = CommerceConfig.getConfig();
+
+                // REPARO (Fase 9): loja já configurada, cargo de staff já
+                // existe, mas falta o canal de logs de vendas (setup
+                // parcial antigo, ou uma falha no meio da criação de
+                // canais numa execução anterior). Sem este canal, toda
+                // notificação de falha de provisionamento (Fases 7/8) cai
+                // num no-op silencioso — reparo cirúrgico, só cria o que
+                // falta, nunca toca no resto da estrutura já existente.
+                if (cfg.staff_role_id && CommerceConfig.getMissingCriticalFields().includes('sales_log_channel_id')) {
+                    await interaction.deferReply({ ephemeral: true });
+                    try {
+                        const guild = interaction.guild;
+                        const salesLogChannel = await guild.channels.create({
+                            name: 'logs-de-vendas',
+                            type: ChannelType.GuildText,
+                            parent: cfg.staff_category_id || undefined,
+                        });
+                        CommerceConfig.saveChannelStructure({ sales_log_channel_id: salesLogChannel.id });
+                        return interaction.editReply({
+                            content: `✅ Canal de logs de vendas criado: ${salesLogChannel}. Falhas de provisionamento voltam a ser notificadas lá.`,
+                        });
+                    } catch (err) {
+                        console.error('❌ Erro ao reparar o canal de logs de vendas:', err);
+                        return interaction.editReply({ content: `❌ Erro ao criar o canal de logs de vendas: ${err.message}` });
+                    }
+                }
+
                 if (cfg.staff_role_id) {
                     return interaction.reply({
                         content: '⚠️ A loja já está configurada. Para reorganizar os canais, faça isso manualmente no Discord — este comando nunca recria a estrutura pra evitar duplicar categorias.',

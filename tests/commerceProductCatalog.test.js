@@ -48,6 +48,81 @@ test('saveProduct: rejeita price não-numérico ou negativo', () => {
     assert.throws(() => makeDraftProduct({ price: -10 }));
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// FASE 9 (hardening): specs acima do teto do host — produto estruturalmente invendível
+// ═══════════════════════════════════════════════════════════════════════
+
+test('saveProduct: rejeita RAM acima do teto do host (HOST_MAX_RAM_PER_BOT), antes de qualquer INSERT/UPDATE', () => {
+    const originalRamCap = process.env.HOST_MAX_RAM_PER_BOT;
+    process.env.HOST_MAX_RAM_PER_BOT = '500';
+    try {
+        assert.throws(() => makeDraftProduct({ id: 'prod-ram-over', maxRam: 900 }), /teto do host/);
+        assert.equal(ProductCatalog.getProduct('prod-ram-over'), undefined, 'nada deveria ter sido gravado');
+    } finally {
+        if (originalRamCap === undefined) delete process.env.HOST_MAX_RAM_PER_BOT;
+        else process.env.HOST_MAX_RAM_PER_BOT = originalRamCap;
+    }
+});
+
+test('saveProduct: rejeita CPU acima do teto do host (HOST_MAX_CPU_PER_BOT)', () => {
+    const originalCpuCap = process.env.HOST_MAX_CPU_PER_BOT;
+    process.env.HOST_MAX_CPU_PER_BOT = '40';
+    try {
+        assert.throws(() => makeDraftProduct({ id: 'prod-cpu-over', maxCpu: 60 }), /teto do host/);
+        assert.equal(ProductCatalog.getProduct('prod-cpu-over'), undefined);
+    } finally {
+        if (originalCpuCap === undefined) delete process.env.HOST_MAX_CPU_PER_BOT;
+        else process.env.HOST_MAX_CPU_PER_BOT = originalCpuCap;
+    }
+});
+
+test('saveProduct: rejeita quantidade de bots acima do teto do host (HOST_MAX_BOTS_PER_USER)', () => {
+    const originalBotsCap = process.env.HOST_MAX_BOTS_PER_USER;
+    process.env.HOST_MAX_BOTS_PER_USER = '3';
+    try {
+        assert.throws(() => makeDraftProduct({ id: 'prod-bots-over', maxBots: 7 }), /teto do host/);
+        assert.equal(ProductCatalog.getProduct('prod-bots-over'), undefined);
+    } finally {
+        if (originalBotsCap === undefined) delete process.env.HOST_MAX_BOTS_PER_USER;
+        else process.env.HOST_MAX_BOTS_PER_USER = originalBotsCap;
+    }
+});
+
+test('saveProduct: specs EXATAMENTE no teto (nunca clampadas) são aceitas normalmente', () => {
+    const originalRamCap = process.env.HOST_MAX_RAM_PER_BOT;
+    process.env.HOST_MAX_RAM_PER_BOT = '500';
+    try {
+        assert.doesNotThrow(() => makeDraftProduct({ id: 'prod-ram-exact', maxRam: 500 }));
+    } finally {
+        if (originalRamCap === undefined) delete process.env.HOST_MAX_RAM_PER_BOT;
+        else process.env.HOST_MAX_RAM_PER_BOT = originalRamCap;
+    }
+});
+
+test('saveProduct: specs dentro do teto padrão (sem override de env) continuam sendo aceitas normalmente', () => {
+    assert.doesNotThrow(() => makeDraftProduct({ id: 'prod-within-default', maxBots: 5, maxRam: 480, maxCpu: 45 }));
+});
+
+test('publishProduct: rejeita um produto DRAFT pré-existente cujas specs ficaram acima do teto (defesa em profundidade, mesmo se saveProduct() não tivesse rejeitado antes)', () => {
+    // Simula um registro criado ANTES desta validação existir — grava
+    // direto no banco, contornando saveProduct(), pra emular um dado
+    // legado. publishProduct() precisa revalidar de qualquer forma.
+    const { run } = require('../src/database/database');
+    run(
+        `INSERT INTO commerce_products (id, name, price, max_bots, max_ram, max_cpu, storage, billing_period, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ['prod-legacy-over', 'Legado', 10, 2, 99999, 30, 1024, 'monthly', ProductCatalog.PRODUCT_STATUS.DRAFT]
+    );
+    assert.throws(() => ProductCatalog.publishProduct('prod-legacy-over'), /teto do host/);
+    assert.equal(ProductCatalog.getProduct('prod-legacy-over').status, ProductCatalog.PRODUCT_STATUS.DRAFT, 'nunca deveria ter sido publicado');
+});
+
+test('publishProduct: continua funcionando normalmente pra um produto dentro do teto (sem regressão)', () => {
+    const product = makeDraftProduct({ id: 'prod-publish-ok' });
+    const published = ProductCatalog.publishProduct(product.id);
+    assert.equal(published.status, ProductCatalog.PRODUCT_STATUS.PUBLISHED);
+});
+
 test('saveProduct: ON CONFLICT atualiza o produto existente (mesmo id) em vez de duplicar', () => {
     const product = makeDraftProduct({ id: 'prod-fixed', price: 10 });
     const updated = ProductCatalog.saveProduct({ ...product, price: 20, maxBots: product.max_bots, maxRam: product.max_ram, maxCpu: product.max_cpu, name: product.name });

@@ -138,8 +138,40 @@ function markRenewalReminderSent(entitlementId) {
  * entitlement 'active' pra este orderId, retorna ele sem reprocessar
  * (mesmo princípio de idempotência do ProvisioningManager, arquitetura
  * §8 — este é o passo final que ele vai chamar).
+ *
+ * FASE 9 (correção de C1 — "entitlement fantasma"): antes desta fase, a
+ * linha nascia direto com status='active', ANTES de
+ * `recomputeUserCapacity()` confirmar que a capacidade foi realmente
+ * aplicada — se isso falhasse, sobrava um entitlement 'active' sem
+ * capacidade real, e um retry (achando `existingForOrder.status===ACTIVE`)
+ * retornava cedo demais, sem tentar de novo.
+ *
+ * Agora a linha nasce (ou é retomada) como PENDING_PROVISIONING — valor
+ * que já era o DEFAULT da coluna desde a Fase 2 (`commerce_entitlements.status
+ * DEFAULT 'pending_provisioning'`), nunca antes usado por `grant()`. Só é
+ * promovida pra 'active' DEPOIS de `capacityManager.writeUserCapacity()`
+ * ter sido chamado com sucesso. Um retry que encontra a linha ainda
+ * PENDING_PROVISIONING (em vez de criar uma segunda) a REUTILIZA — tenta
+ * aplicar a capacidade de novo, e só promove se conseguir.
+ *
+ * Nota de implementação: a escrita de capacidade aqui chama
+ * `capacityManager.writeUserCapacity()` diretamente (não
+ * `capacityManager.recomputeUserCapacity()`) — de propósito.
+ * `recomputeUserCapacity()` decide a capacidade lendo
+ * `getActiveEntitlement()`, mas nesse ponto do fluxo o entitlement sendo
+ * concedido AINDA NÃO está 'active' (é exatamente o que só deve acontecer
+ * depois da capacidade confirmada) — chamar `recomputeUserCapacity()"
+ * aqui encontraria "nenhum entitlement ativo" e aplicaria a capacidade
+ * ERRADA (plano legado ou default). Como já sabemos, neste ponto exato,
+ * que ESTE é o entitlement que vai virar o ativo, usamos o snapshot do
+ * próprio `order` (já em memória, sem nem precisar reler o banco) e
+ * chamamos o primitivo de escrita mais baixo nível de capacityManager.js
+ * — que continua sendo, sem nenhuma alteração nesse arquivo, o único
+ * lugar que escreve em `users.max_bots/max_ram/max_cpu`.
  */
 function grant(orderId) {
+    const capacityManager = require('../capacityManager');
+
     const order = OrderManager.getOrder(orderId);
     if (!order) throw new Error(`Pedido não encontrado: ${orderId}`);
     if (order.status !== OrderManager.STATUS.PROVISIONING) {
@@ -148,74 +180,116 @@ function grant(orderId) {
 
     const existingForOrder = getEntitlementByOrder(orderId);
     if (existingForOrder && existingForOrder.status === ENTITLEMENT_STATUS.ACTIVE) {
-        return existingForOrder; // já concedido — no-op idempotente
+        return existingForOrder; // já concedido e confirmado — no-op idempotente
     }
 
-    const now = new Date();
-    let activatedAt;
+    let entitlement;
 
-    if (order.renewal_of_entitlement_id) {
-        const referenced = getEntitlement(order.renewal_of_entitlement_id);
-        if (!referenced || referenced.user_id !== order.user_id) {
-            throw new Error(`Pedido #${orderId}: renewal_of_entitlement_id (${order.renewal_of_entitlement_id}) não pertence ao usuário ${order.user_id}.`);
-        }
-        if (referenced.status === ENTITLEMENT_STATUS.REVOKED) {
-            throw new Error(`Não é possível renovar o entitlement #${referenced.id} — ele foi revogado administrativamente.`);
-        }
-
-        const currentActive = getActiveEntitlement(order.user_id);
-        if (currentActive && currentActive.id !== referenced.id) {
-            throw new EntitlementConflictError(
-                `Usuário ${order.user_id} já tem um entitlement ativo (#${currentActive.id}) diferente do que está sendo renovado (#${referenced.id}) — não acumula múltiplos entitlements simultaneamente.`
-            );
-        }
-
-        // Decisão #1 (renovação antecipada): activated_at = max(agora,
-        // expires_at do anterior). Renovação após expiração começa
-        // imediatamente — coberto pela mesma fórmula (max com uma data
-        // passada resolve pra "agora").
-        const referencedExpiresAt = fromSqliteDatetime(referenced.expires_at);
-        activatedAt = referencedExpiresAt && referencedExpiresAt > now ? referencedExpiresAt : now;
-
-        // Fecha o entitlement anterior — nunca duas linhas 'active' pro
-        // mesmo usuário simultaneamente (decisão #2). Só toca se ainda
-        // estiver 'active' (renovar um já expirado não precisa reescrever
-        // status, já está correto).
-        if (referenced.status === ENTITLEMENT_STATUS.ACTIVE) {
-            run("UPDATE commerce_entitlements SET status = ?, updated_at = datetime('now') WHERE id = ?", [ENTITLEMENT_STATUS.EXPIRED, referenced.id]);
-        }
+    if (existingForOrder && existingForOrder.status === ENTITLEMENT_STATUS.PENDING_PROVISIONING) {
+        // RETOMADA: uma tentativa anterior já criou esta linha e já fechou
+        // o entitlement antigo (se era renovação), mas morreu ou falhou
+        // antes de confirmar a capacidade. Nunca cria uma segunda linha —
+        // reusa esta mesma, tenta de novo a partir da aplicação de
+        // capacidade.
+        entitlement = existingForOrder;
     } else {
-        const currentActive = getActiveEntitlement(order.user_id);
-        if (currentActive) {
-            throw new EntitlementConflictError(
-                `Usuário ${order.user_id} já tem um entitlement ativo (#${currentActive.id}) — não acumula múltiplos entitlements simultaneamente na v1. Use renewal_of_entitlement_id para renovar o existente.`
-            );
+        // CRIAÇÃO FRESCA (nenhuma linha existe ainda pra este pedido).
+        const now = new Date();
+        let activatedAt;
+
+        if (order.renewal_of_entitlement_id) {
+            const referenced = getEntitlement(order.renewal_of_entitlement_id);
+            if (!referenced || referenced.user_id !== order.user_id) {
+                throw new Error(`Pedido #${orderId}: renewal_of_entitlement_id (${order.renewal_of_entitlement_id}) não pertence ao usuário ${order.user_id}.`);
+            }
+            if (referenced.status === ENTITLEMENT_STATUS.REVOKED) {
+                throw new Error(`Não é possível renovar o entitlement #${referenced.id} — ele foi revogado administrativamente.`);
+            }
+
+            const currentActive = getActiveEntitlement(order.user_id);
+            if (currentActive && currentActive.id !== referenced.id) {
+                throw new EntitlementConflictError(
+                    `Usuário ${order.user_id} já tem um entitlement ativo (#${currentActive.id}) diferente do que está sendo renovado (#${referenced.id}) — não acumula múltiplos entitlements simultaneamente.`
+                );
+            }
+
+            // Decisão #1 (renovação antecipada): activated_at = max(agora,
+            // expires_at do anterior). Renovação após expiração começa
+            // imediatamente — coberto pela mesma fórmula (max com uma data
+            // passada resolve pra "agora").
+            const referencedExpiresAt = fromSqliteDatetime(referenced.expires_at);
+            activatedAt = referencedExpiresAt && referencedExpiresAt > now ? referencedExpiresAt : now;
+
+            // Fecha o entitlement anterior — nunca duas linhas 'active' pro
+            // mesmo usuário simultaneamente (decisão #2). Só toca se ainda
+            // estiver 'active' (renovar um já expirado não precisa reescrever
+            // status, já está correto). Isto SÓ acontece na criação fresca —
+            // uma retomada nunca refaz este passo (já foi feito).
+            if (referenced.status === ENTITLEMENT_STATUS.ACTIVE) {
+                run("UPDATE commerce_entitlements SET status = ?, updated_at = datetime('now') WHERE id = ?", [ENTITLEMENT_STATUS.EXPIRED, referenced.id]);
+            }
+        } else {
+            const currentActive = getActiveEntitlement(order.user_id);
+            if (currentActive) {
+                throw new EntitlementConflictError(
+                    `Usuário ${order.user_id} já tem um entitlement ativo (#${currentActive.id}) — não acumula múltiplos entitlements simultaneamente na v1. Use renewal_of_entitlement_id para renovar o existente.`
+                );
+            }
+            activatedAt = now;
         }
-        activatedAt = now;
+
+        const expiresAt = addOneMonth(activatedAt);
+
+        run(
+            `INSERT INTO commerce_entitlements (guild_id, order_id, user_id, status, activated_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [order.guild_id, orderId, order.user_id, ENTITLEMENT_STATUS.PENDING_PROVISIONING, toSqliteDatetime(activatedAt), toSqliteDatetime(expiresAt)]
+        );
+        entitlement = getEntitlementByOrder(orderId);
     }
 
-    const expiresAt = addOneMonth(activatedAt);
+    // Revalidação de exclusividade IMEDIATAMENTE antes de promover —
+    // fresca ou retomada, tanto faz: entre a tentativa original (que
+    // criou esta linha PENDING_PROVISIONING, possivelmente há muito
+    // tempo) e agora, uma OUTRA compra deste mesmo usuário pode ter virado
+    // 'active' nesse intervalo. Promover esta de qualquer forma criaria
+    // uma segunda linha 'active' — nunca permitido. Se isso acontecer,
+    // lança o mesmo EntitlementConflictError de sempre; esta linha
+    // continua PENDING_PROVISIONING pra sempre (não é apagada — decisão
+    // #16 da Fase 7, nunca destruir evidência; precisa de reconciliação
+    // manual, o mesmo já valia antes desta correção pra qualquer outro
+    // tipo de falha).
+    const currentActiveBeforePromote = getActiveEntitlement(order.user_id);
+    if (currentActiveBeforePromote && currentActiveBeforePromote.id !== entitlement.id) {
+        throw new EntitlementConflictError(
+            `Usuário ${order.user_id} já tem outro entitlement ativo (#${currentActiveBeforePromote.id}) — não é possível promover o entitlement #${entitlement.id} (pendente) para ativo sem violar a exclusividade.`
+        );
+    }
 
-    run(
-        `INSERT INTO commerce_entitlements (guild_id, order_id, user_id, status, activated_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [order.guild_id, orderId, order.user_id, ENTITLEMENT_STATUS.ACTIVE, toSqliteDatetime(activatedAt), toSqliteDatetime(expiresAt)]
-    );
+    // Aplica a capacidade ANTES de promover — se lançar (snapshot
+    // corrompido, falha de escrita), a linha permanece
+    // PENDING_PROVISIONING e o erro sobe pro chamador (ProvisioningManager),
+    // exatamente como qualquer outra falha de grant() já fazia.
+    const snapshot = JSON.parse(order.product_snapshot);
+    capacityManager.writeUserCapacity(order.user_id, {
+        maxBots: snapshot.maxBots, maxRam: snapshot.maxRam, maxCpu: snapshot.maxCpu,
+    });
 
-    const entitlement = getEntitlementByOrder(orderId);
-    recomputeUserCapacity(order.user_id);
+    // Só agora, com a capacidade real já escrita, promove pra ACTIVE.
+    run("UPDATE commerce_entitlements SET status = ?, updated_at = datetime('now') WHERE id = ?", [ENTITLEMENT_STATUS.ACTIVE, entitlement.id]);
+    const finalEntitlement = getEntitlement(entitlement.id);
 
     recordAuditEvent({
         userId: null,
         event: 'commerce:entitlement_granted',
         details: JSON.stringify({
-            orderId, entitlementId: entitlement.id, userId: order.user_id,
+            orderId, entitlementId: finalEntitlement.id, userId: order.user_id,
             renewalOf: order.renewal_of_entitlement_id || null,
-            activatedAt: entitlement.activated_at, expiresAt: entitlement.expires_at,
+            activatedAt: finalEntitlement.activated_at, expiresAt: finalEntitlement.expires_at,
         }),
         severity: 'info',
     });
-    return entitlement;
+    return finalEntitlement;
 }
 
 /**

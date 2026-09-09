@@ -32,10 +32,23 @@ function makeLegacyPlan(overrides = {}) {
     savePlan({ id, name: 'Legado', price: 10, max_bots: 4, max_ram: 400, max_cpu: 30, ...overrides });
     return getPlan(id); // savePlan() (legado, não alterado nesta fase) não retorna o registro criado
 }
+// FASE 9: grava o produto direto via SQL, contornando ProductCatalog.saveProduct()/
+// publishProduct() de propósito — desde a Fase 9 os dois rejeitam specs
+// acima do teto do host (ver commerceProductCatalog.test.js), e ESTE
+// arquivo testa uma camada diferente: o que capacityManager.recomputeUserCapacity()
+// faz na ESCRITA quando o snapshot de um pedido tem specs acima do teto
+// (defesa em profundidade — não importa como o produto chegou a existir
+// assim, só que a escrita real de capacidade nunca excede o teto).
 function makeCommerceProductAndEntitlement(userId, overrides = {}) {
     counter += 1;
-    const draftProduct = ProductCatalog.saveProduct({ id: `capmgr-prod-${counter}`, name: 'Novo', price: 20, maxBots: 7, maxRam: 700, maxCpu: 45, ...overrides });
-    const product = ProductCatalog.publishProduct(draftProduct.id);
+    const spec = { maxBots: 7, maxRam: 700, maxCpu: 45, ...overrides };
+    const productId = `capmgr-prod-${counter}`;
+    run(
+        `INSERT INTO commerce_products (id, name, price, max_bots, max_ram, max_cpu, storage, billing_period, status)
+         VALUES (?, 'Novo', 20, ?, ?, ?, 1024, 'monthly', 'published')`,
+        [productId, spec.maxBots, spec.maxRam, spec.maxCpu]
+    );
+    const product = ProductCatalog.getProduct(productId);
     const order = OrderManager.createOrder({ userId, channelId: `capmgr-channel-${counter}` });
     OrderManager.confirmProduct(order.id, product.id);
     run("UPDATE commerce_orders SET status = 'PROVISIONING' WHERE id = ?", [order.id]);

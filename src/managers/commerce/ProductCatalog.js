@@ -27,6 +27,7 @@
  */
 const { get, run, query } = require('../../database/database');
 const { recordAuditEvent } = require('../auditManager');
+const capacityManager = require('../capacityManager');
 
 const PRODUCT_STATUS = Object.freeze({
     DRAFT: 'draft',
@@ -45,6 +46,30 @@ const VALID_PRODUCT_TRANSITIONS = Object.freeze({
 });
 
 const VALID_BILLING_PERIODS = new Set(['monthly']); // v1: só mensal (decisão #3)
+
+/**
+ * FASE 9 (hardening): um produto com specs acima do teto real do host
+ * nunca é vendável — `capacityManager.applyHostCaps()` clampa a escrita
+ * de capacidade silenciosamente, e a verificação pós-grant() do
+ * ProvisioningManager (Fase 7, não alterada) compara contra o snapshot
+ * BRUTO do produto — então toda venda desse produto falharia sempre, já
+ * depois do pagamento confirmado. Nunca duplica a leitura de
+ * `HOST_MAX_*` aqui — reusa `applyHostCaps()` como fonte única de
+ * verdade dos limites (o mesmo que decide o clamp real).
+ */
+function assertWithinHostCaps({ maxBots, maxRam, maxCpu }) {
+    const capped = capacityManager.applyHostCaps({ maxBots, maxRam, maxCpu });
+    const problems = [];
+    if (capped.maxBots !== Number(maxBots)) problems.push(`bots (${maxBots} > teto do host ${capped.maxBots})`);
+    if (capped.maxRam !== Number(maxRam)) problems.push(`RAM (${maxRam}MB > teto do host ${capped.maxRam}MB)`);
+    if (capped.maxCpu !== Number(maxCpu)) problems.push(`CPU (${maxCpu}% > teto do host ${capped.maxCpu}%)`);
+    if (problems.length) {
+        throw new Error(
+            `Produto estruturalmente invendível — specs acima do teto do host: ${problems.join(', ')}. ` +
+            `Reduza os valores ou peça pro administrador aumentar HOST_MAX_RAM_PER_BOT/HOST_MAX_CPU_PER_BOT/HOST_MAX_BOTS_PER_USER.`
+        );
+    }
+}
 
 /**
  * Cria ou atualiza um produto. Nunca apaga — arquivar (archiveProduct) é
@@ -78,6 +103,7 @@ function saveProduct(productData) {
     if (!VALID_BILLING_PERIODS.has(billingPeriod)) {
         throw new Error(`billingPeriod inválido: "${billingPeriod}". Válidos na v1: ${[...VALID_BILLING_PERIODS].join(', ')}.`);
     }
+    assertWithinHostCaps({ maxBots, maxRam, maxCpu });
 
     const existing = getProduct(id);
     const isNew = !existing;
@@ -131,8 +157,19 @@ function transitionProductStatus(productId, fromStatuses, toStatus, auditEvent) 
     return getProduct(productId);
 }
 
-/** Publica o produto — passa a aparecer na loja e a poder ser comprado. */
+/**
+ * Publica o produto — passa a aparecer na loja e a poder ser comprado.
+ *
+ * FASE 9: revalida contra o teto do host mesmo aqui — defesa em
+ * profundidade pra um registro que já existia no banco antes desta
+ * validação existir (saveProduct() só valida no momento em que É
+ * chamado; um DRAFT/PAUSED antigo com specs inválidas nunca passaria
+ * por saveProduct() de novo só por estar sendo publicado agora).
+ */
 function publishProduct(productId) {
+    const product = getProduct(productId);
+    if (!product) throw new Error(`Produto não encontrado: ${productId}`);
+    assertWithinHostCaps({ maxBots: product.max_bots, maxRam: product.max_ram, maxCpu: product.max_cpu });
     return transitionProductStatus(productId, [PRODUCT_STATUS.DRAFT, PRODUCT_STATUS.PAUSED], PRODUCT_STATUS.PUBLISHED, 'commerce:product_published');
 }
 

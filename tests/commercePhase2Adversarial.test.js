@@ -290,7 +290,7 @@ test('SNAPSHOT: editar o produto DEPOIS de um pedido confirmado nunca altera o p
     const beforeEdit = OrderManager.getOrder(order.id);
     assert.equal(beforeEdit.total_price, 40);
 
-    ProductCatalog.saveProduct({ ...product, price: 4000, maxBots: 999, name: product.name, maxRam: product.max_ram, maxCpu: product.max_cpu });
+    ProductCatalog.saveProduct({ ...product, price: 4000, maxBots: 9, name: product.name, maxRam: product.max_ram, maxCpu: product.max_cpu });
 
     const afterEdit = OrderManager.getOrder(order.id);
     assert.equal(afterEdit.total_price, 40, 'total_price do pedido nunca deveria mudar com uma edição posterior do produto');

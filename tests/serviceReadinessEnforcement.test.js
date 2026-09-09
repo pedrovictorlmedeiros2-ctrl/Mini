@@ -18,6 +18,18 @@ const { computeReadiness, STATUS } = require('../src/managers/serviceReadiness')
 const { startBot } = require('../src/managers/processManager');
 const { installDependencies } = require('../src/managers/dependencyManager');
 
+// FASE 9: computeReadiness() agora dispara alertManager.sendAlert()/
+// clientRef.tryDM() em toda mudança de estado — este arquivo também seta
+// LOG_WEBHOOK_URL com um domínio real (discord.com, só com IDs falsos)
+// pra simular "webhook configurado". Sem este stub, os testes abaixo
+// disparariam uma chamada de rede real. Nenhuma asserção existente
+// depende do comportamento de sendAlert()/tryDM(), então interceptar
+// aqui não muda nada do que já era testado.
+const alertManager = require('../src/managers/alertManager');
+const clientRef = require('../src/utils/clientRef');
+alertManager.sendAlert = async () => {};
+clientRef.tryDM = async () => true;
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'atlantic-readiness-enforcement-'));
 
 run(`INSERT INTO users (id, username, role) VALUES ('owner-readiness-test', 'tester', 'client')`);
